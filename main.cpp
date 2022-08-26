@@ -198,7 +198,7 @@ Spinor make_guess(World& world, const int nuclear_charge, const int k) {
     const double alpha=constants::fine_structure_constant;
     const double gamma=sqrt(k*k-nuclear_charge*nuclear_charge*alpha*alpha);
     print("gamma-1",gamma-1.0);
-    const double C=nuclear_charge/n;
+    const double C=0.95*nuclear_charge/n;
     result.components[0]=complex_factory_3d(world).functor([&Z,&gamma,&alpha,&C,&ii,&one](const coord_3d& r){return std::pow(r.normf(),gamma-1.0)*one*(1+gamma)*exp(-C*r.normf());});
     result.components[1]=complex_factory_3d(world).functor([&Z,&gamma,&alpha,&C,&ii,&one](const coord_3d& r){return std::pow(r.normf(),gamma-1.0)*0.0*one;});
     result.components[2]=complex_factory_3d(world).functor([&Z,&gamma,&alpha,&C,&ii,&one](const coord_3d& r){return std::pow(r.normf(),gamma-1.0)*ii*Z*alpha*r[2]/r.normf()*exp(-C*r.normf());});
