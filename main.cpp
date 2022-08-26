@@ -57,9 +57,18 @@ public:
         components.resize(4);
     }
 
+    Spinor(const vector_complex_function_3d& components) : components(components){}
+
     Spinor& operator+=(const Spinor& other) {
         components+=other.components;
         return *this;
+    }
+
+    Spinor operator+(const Spinor& other) const {
+        Spinor result;
+        result.components=copy(world(),components); // deep copy
+        result.components+=other.components;
+        return result;
     }
 
     void normalize() {
@@ -73,6 +82,10 @@ public:
 
 };
 
+template<typename T>
+Spinor operator*(const T fac, const Spinor& arg) {
+    return Spinor(fac*arg.components);
+}
 
 
 /// class defining an operator in matrix form, fixed to size (4,4)
@@ -131,6 +144,17 @@ public:
         return *this;
     }
 
+    void pad(World& world) {
+        complex_function_3d zero1=complex_factory_3d(world)
+                .functor([&](const coord_3d& r){return double_complex(0.0,0.0);});
+        auto zero=LocalPotentialOperator<double_complex,3>(world,"0",zero1);
+        for (int i=0; i<ncol(); ++i) {
+            for (int j=0; j<nrow(); ++j) {
+                if (elements[i][j].empty())
+                    add_operator(i,j,double_complex(0.0,0.0),std::make_shared<LocalPotentialOperator<double_complex,3>>(zero));
+            }
+        }
+    }
     MatrixOperator operator+(const MatrixOperator& other) const {
         MatrixOperator result;
         for (int i=0; i<ncol(); ++i) {
@@ -233,28 +257,9 @@ MatrixOperator make_sp(World& world) {
     return sp;
 }
 
-/// this is c sigma p + beta m c^2
-MatrixOperator make_Hd(World& world) {
-    MatrixOperator Hd;
-    MatrixOperator sp=make_sp(world);
-    Hd.add_submatrix(0,2,sp);
-    Hd.add_submatrix(2,0,sp);
-    const double alpha=constants::fine_structure_constant;
-    complex_function_3d mc2=complex_factory_3d(world).functor([&alpha](const coord_3d& r){return double_complex(1.0/(alpha*alpha),0.0);});
-    auto vmc2=LocalPotentialOperator<double_complex,3>(world,"mc^2",mc2);
-    Hd.add_operator(0,0, 1.0,std::make_shared<LocalPotentialOperator<double_complex,3>>(vmc2));
-    Hd.add_operator(1,1, 1.0,std::make_shared<LocalPotentialOperator<double_complex,3>>(vmc2));
-    Hd.add_operator(2,2,-1.0,std::make_shared<LocalPotentialOperator<double_complex,3>>(vmc2));
-    Hd.add_operator(3,3,-1.0,std::make_shared<LocalPotentialOperator<double_complex,3>>(vmc2));
-    return Hd;
-}
 
-/// this is the nuclear potential on the diagonal
-MatrixOperator make_Hv(World& world, const int nuclear_charge) {
+MatrixOperator make_Hdiag(World& world, const LocalPotentialOperator<double_complex,3>& V1) {
     MatrixOperator Hv;
-    double Z=double (nuclear_charge);
-    complex_function_3d V=complex_factory_3d(world).functor([&Z](const coord_3d& r){return double_complex(-Z/(r.normf()+1.e-12),0.0);});
-    auto V1=LocalPotentialOperator<double_complex,3>(world,"V",V);
     Hv.add_operator(0,0, 1.0,std::make_shared<LocalPotentialOperator<double_complex,3>>(V1));
     Hv.add_operator(1,1, 1.0,std::make_shared<LocalPotentialOperator<double_complex,3>>(V1));
     Hv.add_operator(2,2, 1.0,std::make_shared<LocalPotentialOperator<double_complex,3>>(V1));
@@ -262,12 +267,45 @@ MatrixOperator make_Hv(World& world, const int nuclear_charge) {
     return Hv;
 }
 
+MatrixOperator make_Hdiag(World& world, const double val) {
+    MatrixOperator Hv;
+    complex_function_3d V=complex_factory_3d(world).functor([&val](const coord_3d& r){return double_complex(val,0.0);});
+    auto V1=LocalPotentialOperator<double_complex,3>(world,"V",V);
+    return make_Hdiag(world,V1);
+}
+
+/// this is c sigma p + beta m c^2
+MatrixOperator make_Hd(World& world) {
+    MatrixOperator Hd;
+    MatrixOperator sp=make_sp(world);
+    Hd.add_submatrix(0,2,sp);
+    Hd.add_submatrix(2,0,sp);
+
+    const double alpha=constants::fine_structure_constant;
+    const double_complex c2=double_complex(1.0/(alpha*alpha),0.0);
+    complex_function_3d V=complex_factory_3d(world).functor([](const coord_3d& r){return double_complex(1.0,0.0);});
+    auto V1=LocalPotentialOperator<double_complex,3>(world,"mc2",V);
+    Hd.add_operator(0,0, c2,std::make_shared<LocalPotentialOperator<double_complex,3>>(V1));
+    Hd.add_operator(1,1, c2,std::make_shared<LocalPotentialOperator<double_complex,3>>(V1));
+    Hd.add_operator(2,2,-c2,std::make_shared<LocalPotentialOperator<double_complex,3>>(V1));
+    Hd.add_operator(3,3,-c2,std::make_shared<LocalPotentialOperator<double_complex,3>>(V1));
+    return Hd;
+}
+
+
+/// this is the nuclear potential on the diagonal
+MatrixOperator make_Hv(World& world, const int nuclear_charge) {
+    complex_function_3d V=complex_factory_3d(world)
+            .functor([&nuclear_charge](const coord_3d& r){return double_complex(-nuclear_charge/(r.normf()+1.e-8));});
+    auto V1=LocalPotentialOperator<double_complex,3>(world,"V",V);
+    return make_Hdiag(world,V1);
+}
+
 MatrixOperator make_H(World& world, const int nuclear_charge, const int regularization_order) {
-    MatrixOperator Hd=make_Hd(world);
-    Hd+=make_Hv(world,nuclear_charge);
+    MatrixOperator H=make_Hd(world);
+    H+=make_Hv(world,nuclear_charge);
     const double_complex ii=double_complex(0.0,1.0);
     const double_complex one=double_complex(1.0,0.0);
-    const double Z=double(nuclear_charge);
     const double alpha=constants::fine_structure_constant;
     const double c=1.0/alpha;
     const double gamma=sqrt(1-nuclear_charge*nuclear_charge*alpha*alpha);
@@ -282,57 +320,97 @@ MatrixOperator make_H(World& world, const int nuclear_charge, const int regulari
 
 
     if (regularization_order==1) {
-        Hd.add_operator(0,2,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
-        Hd.add_operator(0,3,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
-        Hd.add_operator(0,3,-one*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
+        H.add_operator(0,2,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
+        H.add_operator(0,3,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
+        H.add_operator(0,3,-one*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
     }
 
     if (regularization_order==1) {
-        Hd.add_operator(1,2,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
-        Hd.add_operator(1,2,    c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
-        Hd.add_operator(1,3, ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
+        H.add_operator(1,2,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
+        H.add_operator(1,2,    c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
+        H.add_operator(1,3, ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
     }
 
     if (regularization_order==1) {
-        Hd.add_operator(2,0,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
-        Hd.add_operator(2,1,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
-        Hd.add_operator(2,1,-one*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
+        H.add_operator(2,0,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
+        H.add_operator(2,1,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
+        H.add_operator(2,1,-one*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
     }
 
     if (regularization_order==1) {
-        Hd.add_operator(3,0,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
-        Hd.add_operator(3,0,    c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
-        Hd.add_operator(3,1, ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
+        H.add_operator(3,0,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
+        H.add_operator(3,0,    c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
+        H.add_operator(3,1, ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
     }
 
-    return Hd;
+    return H;
 }
 
 
-Spinor apply_bsh(const MatrixOperator& H, const Spinor& spinor, const double energy) {
+Spinor apply_bsh(const MatrixOperator& Hd, const MatrixOperator& Hv, const Spinor& spinor, const double energy) {
     World& world=spinor.world();
     double lo=FunctionDefaults<3>::get_thresh();
     const double alpha=constants::fine_structure_constant;
     const double c=1.0/alpha;
-    double mu=sqrt(c*c - energy*energy/c*c);
-    auto g=BSHOperator<3>(world,mu,lo,FunctionDefaults<3>::get_thresh());
-    auto Hd= make_Hd(world);
+    double mu=sqrt(c*c - energy*energy/(c*c));
+    print("energy in apply_bsh",energy);
+    print("mu in bsh: ",mu);
+    auto g=BSHOperator<3>(world,mu,1.e-8,FunctionDefaults<3>::get_thresh());
+    auto vpsi=-2.0*Hv(spinor);
+    double n1=norm2(world,vpsi.components);
+    print("norm of vpsi",n1);
 
+    auto gvpsi1=apply(world,g,vpsi.components);
+    double n2=norm2(world,gvpsi1);
+    print("norm of gvpsi",n2);
+
+    auto gvpsi=Spinor(truncate(gvpsi1));
+    double n3=norm2(world,gvpsi.components);
+    print("norm of spinor(gvpsi)",n3);
+
+    auto result=0.5*alpha*alpha*(Hd(gvpsi) + energy*gvpsi);
+    double n4=norm2(world,result.components);
+    print("norm of Hd(gvpsi)",n4);
+
+    result.normalize();
+
+    return result;
 }
 
 
 
 int main(int argc, char* argv[]) {
     World& world=initialize(argc,argv);
+    if (world.rank()==0) {
+        print("\n");
+        print_centered("Dirac hydrogen atom");
+    }
     startup(world,argc,argv,true);
+
+    commandlineparser parser(argc,argv);
+    if (world.rank()==0) {
+        print("command line options");
+        parser.print_map();
+    }
+
+    // set defaults
+    int nuclear_charge=92;
     FunctionDefaults<3>::set_cubic_cell(-20,20);
     FunctionDefaults<3>::set_k(12);
     FunctionDefaults<3>::set_thresh(1.e-10);
-    print("Dirac hydrogen atom");
+    if (parser.key_exists("charge")) nuclear_charge=atoi(parser.value("charge").c_str());
+    if (parser.key_exists("k")) FunctionDefaults<3>::set_k(atoi(parser.value("k").c_str()));
+    if (parser.key_exists("thresh")) FunctionDefaults<3>::set_thresh(atof(parser.value("thresh").c_str()));
+    if (parser.key_exists("L")) FunctionDefaults<3>::set_cubic_cell(atof(parser.value("L").c_str()),atof(parser.value("L").c_str()));
+
+    print("thresh   ",FunctionDefaults<3>::get_thresh());
+    print("k        ",FunctionDefaults<3>::get_k());
+    print("charge   ",nuclear_charge);
+    print("cell     ",FunctionDefaults<3>::get_cell_width());
+
 
     const double alpha=constants::fine_structure_constant;
     const double c=1.0/alpha;
-    const int nuclear_charge=92;
     const double gamma=sqrt(1-nuclear_charge*nuclear_charge*alpha*alpha);
     print("speed of light",c);
     print("fine structure constant",alpha);
@@ -347,17 +425,30 @@ int main(int argc, char* argv[]) {
     try {
         {
             Spinor guess = make_guess(world, nuclear_charge, k);
+            guess.normalize();
             plot_line("spinor_0_re",npt,lo,hi,real(guess.components[0]));
-            MatrixOperator Hd = make_H(world, nuclear_charge,0);
-            Hd.print();
-            double_complex norm2 = inner(guess, guess);
-            print("norm2 of guess", norm2);
-            Spinor Hpsi = Hd(guess);
+
+            MatrixOperator H = make_H(world, nuclear_charge,0);
+            H.print();
+            Spinor Hpsi = H(guess);
             double_complex energy = inner(guess, Hpsi);
-            print("unnormalized energy", energy);
-            print("computed energy  ", real(energy) / real(norm2) - c * c);
+            print("computed energy  ", real(energy)  - c * c);
             print("exact energy     ", energy_exact);
-            print("energy difference", (real(energy) / real(norm2) - c * c) - energy_exact);
+            print("energy difference", (real(energy) - c * c) - energy_exact);
+
+            auto Hd=make_Hd(world);
+            auto Hv=make_Hv(world,nuclear_charge);
+            for (int i=0; i<5; ++i) {
+                print("\nIteration ",i);
+                auto newpsi=apply_bsh(Hd,Hv,guess,energy_exact+c*c);
+                double_complex en=inner(newpsi,H(newpsi));
+                print("computed energy  ", real(en)  - c * c);
+                print("exact energy     ", energy_exact);
+                print("energy difference", (real(en) - c * c) - energy_exact);
+                guess=newpsi;
+            }
+
+
         }
 
         {
