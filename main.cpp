@@ -82,7 +82,8 @@ public:
     }
 
     friend double_complex inner(const Spinor& bra, const Spinor& ket) {
-        return inner(bra.components,ket.components);  // implies complex conjugation
+        auto result= inner(bra.components,ket.components);  // implies complex conjugation
+        return result;
     }
 
 };
@@ -298,6 +299,87 @@ MatrixOperator make_Hv_reg2(World& world, const int nuclear_charge, const double
     return H;
 }
 
+/// Hv for ansatz 3
+MatrixOperator make_Hv_reg3(World& world, const int nuclear_charge, const double aa) {
+    MatrixOperator H;
+    const double_complex ii=double_complex(0.0,1.0);
+    const double_complex one=double_complex(1.0,0.0);
+    const double alpha=constants::fine_structure_constant;
+    const double c=1.0/alpha;
+    const double gamma=sqrt(1-nuclear_charge*nuclear_charge*alpha*alpha);
+
+    complex_function_3d c2=complex_factory_3d(world)
+            .functor([&c,&gamma](const coord_3d& r){return double_complex((gamma-1.0)*c*c,0.0);});
+    auto V1=LocalPotentialOperator<double_complex,3>(world,"(gamma-1)c2",c2);
+    return make_Hdiag(world,V1);
+
+    /// !!! REGULARIZATION ERROR HERE IS CRITICAL !!!
+    /// !!! KEEP EPSILON SMALL !!!
+    double epsilon=1.e-8;
+    double a=aa;
+    print("a in make_Hv_reg3",a);
+
+    // without the exponential factor we have in the (1,2) matrix:
+    // i c \sn Z
+    // with the exponential factor we have in the (1,2) matrix:
+    // i c \sn (Z + \Sigma_U)
+    // with \Sigma_U = -aZ/(a-1) exp(-aZr)/R
+    // thus
+    // i c \sn Z ( 1- a/(a-1) exp(-aZr)/R)
+
+    double Z=nuclear_charge;
+    coord_3d sp{0.0,0.0,0.0};
+    std::vector<coord_3d> special_points(1,sp);
+    complex_function_3d x_div_r=complex_factory_3d(world).functor([&epsilon, &Z, &a](const coord_3d& xyz){
+        double r=xyz.normf();
+        double extraterm=1.0;
+        if (a>0.0) extraterm-=a/(a-1.0)*exp(-a*Z*r)/(1.0+1.0/(a-1.0)*exp(-a*Z*r));
+        return xyz[0]/(r+epsilon)*extraterm;
+    }).special_level(15).special_points(special_points);;
+    complex_function_3d y_div_r=complex_factory_3d(world).functor([&epsilon, &Z, &a](const coord_3d& xyz){
+        double r=xyz.normf();
+        double extraterm=1.0;
+        if (a>0.0) extraterm-=a/(a-1.0)*exp(-a*Z*r)/(1.0+1.0/(a-1.0)*exp(-a*Z*r));
+        return xyz[1]/(r+epsilon)*extraterm;
+    }).special_level(15).special_points(special_points);;
+    complex_function_3d z_div_r=complex_factory_3d(world).functor([&epsilon, &Z, &a](const coord_3d& xyz){
+        double r=xyz.normf();
+        double extraterm=1.0;
+        if (a>0.0) extraterm-=a/(a-1.0)*exp(-a*Z*r)/(1.0+1.0/(a-1.0)*exp(-a*Z*r));
+        return xyz[2]/(r+epsilon)*extraterm;
+    }).special_level(15).special_points(special_points);
+
+    std::string extraname = (a>0.0) ? " slater" : "";
+    auto x_div_rexp=LocalPotentialOperator<double_complex,3>(world,"x/r"+extraname,x_div_r);
+    auto y_div_rexp=LocalPotentialOperator<double_complex,3>(world,"y/r"+extraname,y_div_r);
+    auto z_div_rexp=LocalPotentialOperator<double_complex,3>(world,"z/r"+extraname,z_div_r);
+
+    std::string filename="sn_slater";
+    coord_3d lo({0,0,-.3});
+    coord_3d hi({0,0, .3});
+    const int npt=3001;
+    plot_line(filename.c_str(),npt,lo,hi,real(x_div_r),real(y_div_r),real(z_div_r));
+
+    H.add_operator(0,2,  ii*Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_rexp));
+    H.add_operator(0,3,  ii*Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_rexp));
+    H.add_operator(0,3,     Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_rexp));
+
+    H.add_operator(1,2,  ii*Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_rexp));
+    H.add_operator(1,2,    -Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_rexp));
+    H.add_operator(1,3, -ii*Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_rexp));
+
+    H.add_operator(2,0, -ii*Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_rexp));
+    H.add_operator(2,1, -ii*Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_rexp));
+    H.add_operator(2,1,    -Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_rexp));
+
+    H.add_operator(3,0, -ii*Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_rexp));
+    H.add_operator(3,0,     Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_rexp));
+    H.add_operator(3,1,  ii*Z*c,std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_rexp));
+
+    return H;
+}
+
+
 
 struct AnsatzBase {
     virtual void normalize(Spinor& bra, Spinor& ket) const {
@@ -460,17 +542,74 @@ MatrixOperator make_sp(World& world) {
     return sp;
 }
 
+struct Ansatz3 : public AnsatzBase {
+public:
+    double nuclear_charge, k;
+    double a=1.3;
+    Ansatz3(const double nuclear_charge, const int k) : nuclear_charge(nuclear_charge), k(k) {
+        MADNESS_ASSERT(k==1);
+    }
+    const std::string name="3";
+    Spinor make_guess(World& world) const {
+        Spinor result;
+        const double_complex ii(0.0,1.0);
+        const double n=1;
+
+        const double Z=double(nuclear_charge);
+        const double alpha=constants::fine_structure_constant;
+        const double gamma=sqrt(k*k-nuclear_charge*nuclear_charge*alpha*alpha);
+        const double C=0.95*nuclear_charge/n;
+        print("C",C);
+        result.components[0]=complex_factory_3d(world).functor([&Z,&gamma,&alpha,&C,&ii](const coord_3d& r){return double_complex(exp(-r.normf()*r.normf()),0.0);});
+        result.components[1]=complex_factory_3d(world).functor([&Z,&gamma,&alpha,&C,&ii](const coord_3d& r){return double_complex(0.0,0.0);});
+        result.components[2]=complex_factory_3d(world).functor([&Z,&gamma,&alpha,&C,&ii](const coord_3d& r){return  double_complex(0.0,0.0);});
+        result.components[3]=complex_factory_3d(world).functor([&Z,&gamma,&alpha,&C,&ii](const coord_3d& r){return  double_complex(0.0,0.0);});
+        return result;
+    }
+
+
+    MatrixOperator make_Hv(World& world, const int nuclear_charge) {
+        auto Hv=::make_Hv_reg3(world,nuclear_charge,a);
+        return Hv;
+    }
+
+    /// turns argument into its bra form: (r^(\gamma-1))^2
+    Spinor make_bra(const Spinor& ket) const {
+        World& world=ket.world();
+        const double alpha=constants::fine_structure_constant;
+        const double gamma=sqrt(k*k-nuclear_charge*nuclear_charge*alpha*alpha);
+        const double n=1;
+        const double C=nuclear_charge/n;
+        const double Z=nuclear_charge;
+        const double aa=a;
+        coord_3d sp{0.0,0.0,0.0};
+        std::vector<coord_3d> special_points(1,sp);
+        real_function_3d r2=real_factory_3d(world)
+                .functor([&gamma, &Z, &aa](const coord_3d& r){
+                    double R=std::pow(r.normf(),(gamma-1));
+                    if (aa>0.0) R=R*(1.0+ 1.0/(aa-1.0)*exp(-aa*Z*r.normf()));
+//                    double R=std::pow(r.normf(),(gamma-1)) * (1.0+1.0/(aa-1.0)*  exp(-aa*C*r.normf()));
+                    return 2.0*R*R/(gamma+1.0);
+                })
+                .special_level(15).special_points(special_points);
+        Spinor result=Spinor(r2*ket.components);
+        return result;
+    }
+};
+
 
 
 /// this is c sigma p + beta m c^2
-MatrixOperator make_Hd(World& world) {
+
+/// @param[in]  factor  scale the diagonal
+MatrixOperator make_Hd(World& world, const double factor=1.0) {
     MatrixOperator Hd;
     MatrixOperator sp=make_sp(world);
     Hd.add_submatrix(0,2,sp);
     Hd.add_submatrix(2,0,sp);
 
     const double alpha=constants::fine_structure_constant;
-    const double_complex c2=double_complex(1.0/(alpha*alpha),0.0);
+    const double_complex c2=double_complex(1.0/(alpha*alpha),0.0)*factor;
     complex_function_3d V=complex_factory_3d(world).functor([](const coord_3d& r){return double_complex(1.0,0.0);});
     auto V1=LocalPotentialOperator<double_complex,3>(world,"mc2",V);
     Hd.add_operator(0,0, c2,std::make_shared<LocalPotentialOperator<double_complex,3>>(V1));
@@ -511,12 +650,16 @@ Spinor iterate(const MatrixOperator& Hv, Spinor input, const double energy_exact
     World& world=input.world();
     const double alpha=constants::fine_structure_constant;
     const double c=1.0/alpha;
+    const double nuclear_charge=ansatz.nuclear_charge;
+    const double gamma=sqrt(1.0-nuclear_charge*nuclear_charge*alpha*alpha);
 
-    coord_3d lo({0,0,-.1});
-    coord_3d hi({0,0, .1});
+    coord_3d lo({0,0,-.3});
+    coord_3d hi({0,0, .3});
     const int npt=3001;
 
-    auto Hd=make_Hd(world);
+//    double factor = (ansatz.name=="3")? gamma : 1.0 ;
+    double factor = 1.0;
+    auto Hd=make_Hd(world,factor);
     auto H=Hd+Hv;
     for (int i=0; i<maxiter; ++i) {
         double wall0=wall_time();
@@ -541,7 +684,22 @@ template<typename ansatzT>
 void run(World& world, ansatzT ansatz, const int nuclear_charge, const int k) {
     print(" running Ansatz ",ansatz.name);
     Spinor guess = ansatz.make_guess(world);
-    guess.normalize();
+    Spinor bra=ansatz.make_bra(guess);
+    ansatz.normalize(guess,guess);
+    ansatz.normalize(guess,bra);
+    ansatz.normalize(guess,bra);
+    double n=real(inner(bra,guess));
+    print("norm in the beginning",n);
+    {
+        auto norms = inner(world, bra.components, guess.components);
+        print("norms", real(norms));
+    }
+
+    coord_3d lo({0,0,-.3});
+    coord_3d hi({0,0, .3});
+    const int npt=3001;
+    std::string filename="spinor_0_re_ansatz"+ansatz.name+"_guess";
+    plot_line(filename.c_str(),npt,lo,hi,real(guess.components[0]));
 
     const double alpha=constants::fine_structure_constant;
     const double c=1.0/alpha;
@@ -549,16 +707,18 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const int k) {
     double energy_exact=gamma*c*c - c*c;
 
     auto Hv=ansatz.make_Hv(world,nuclear_charge);
-    auto Hd=make_Hd(world);
+//    const double factor = ansatz.name=="3" ? gamma : 1.0;
+    const double factor = 1.0;
+    auto Hd=make_Hd(world,factor);
     auto H=Hv+Hd;
     H.print();
     Spinor Hpsi = H(guess);
-    double_complex energy = inner(guess, Hpsi);
+    double_complex energy = inner(bra, Hpsi);
     print("computed energy  ", real(energy)  - c * c);
     print("exact energy     ", energy_exact);
     print("energy difference", (real(energy) - c * c) - energy_exact);
 
-    auto result=iterate(Hv,guess,energy_exact,ansatz,12);
+    auto result=iterate(Hv,guess,energy_exact,ansatz,10);
 
 }
 
@@ -609,7 +769,8 @@ int main(int argc, char* argv[]) {
     try {
 //        run(world,Ansatz0(nuclear_charge,k),nuclear_charge,k);
 //        run(world,Ansatz1(nuclear_charge,k),nuclear_charge,k);
-        run(world,Ansatz2(nuclear_charge,k),nuclear_charge,k);
+//        run(world,Ansatz2(nuclear_charge,k),nuclear_charge,k);
+        run(world,Ansatz3(nuclear_charge,k),nuclear_charge,k);
     } catch (...) {
         std::cout << "caught an error " << std::endl;
     }
