@@ -23,6 +23,34 @@ struct stepfunction {
     double operator()(const coord_3d& r) { return r[axis]/(r.normf()+epsilon); }
 };
 
+struct ncf_cusp {
+    double a=1.3;
+    double Z=-1;
+    ncf_cusp(double a, double Z) :a(a),Z(Z) {}
+    double operator()(const double& r) const {
+        if (a<0.0) return 1.0;
+        return 1.0+(1.0/(a-1.0))*exp(-a*Z*r);
+    }
+};
+
+struct Sigma_ncf_cusp {
+    double a=1.3;
+    double Z=-1;
+    Sigma_ncf_cusp(double a, double Z) :a(a),Z(Z) {}
+    double operator()(const double& r) const {
+        if (a<0.0) return 0.0;
+        return - a * Z/ (a - 1.0) * exp(-a * Z * r) / (1.0 + 1.0 / (a - 1.0) * exp(-a * Z * r));
+    }
+};
+
+struct ncf_singularity {
+    double gamma=0.0;
+    ncf_singularity(double gamma) : gamma(gamma) {}
+    double operator()(const double& r) const {
+        return std::pow(r,gamma-1.0);
+    }
+};
+
 /// returns the complex value of a given spherical harmonic
 struct SphericalHarmonics{
     long l, m;
@@ -474,25 +502,16 @@ MatrixOperator make_Hv_reg3_snZ(World& world, const double nuclear_charge, const
     std::vector<coord_3d> special_points(1, sp);
 
     auto Zpot=[&Z](const double& r) {return Z;};
-    auto ncf_cusp_pot=[&Z,&a](const double& r) {
-        if (a<0.0) return 0.0;
-        return a / (a - 1.0) * exp(-a * Z * r) / (1.0 + 1.0 / (a - 1.0) * exp(-a * Z * r));
-    };
-    double cc=3.0;
-//    auto long_range_correction = [&cc,&gamma](const double& r){return -2.0*cc*r*(std::pow(r,gamma)-r)*exp(-cc*r*r) - (gamma-1)+ (gamma-1)*exp(-cc*r*r)/(r+(-1.0 + std::pow(r,gamma))*exp(-cc*r*r));};
+    Sigma_ncf_cusp ncf_cusp_pot(a,Z);
 
-    int axis=0;
-    auto func =[&Zpot, ncf_cusp_pot, &axis](const coord_3d& xyz) {
+    int axis=-1;
+    auto func =[&Zpot, &ncf_cusp_pot, &axis](const coord_3d& xyz) {
         double r = xyz.normf();
         const double_complex ii={0.0,1.0};
         const double c=1.0/alpha1;
         const double step=stepfunction(axis)(xyz);
-        return ii*c * step* (Zpot(r)  - ncf_cusp_pot(r));
+        return ii*c * step* (Zpot(r)  + ncf_cusp_pot(r));
     };
-
-    std::string filename1="lr_correction";
-    coord_3d lo1={-20,0,0};
-    coord_3d hi1={20,0,0};
 
     axis=0;
     complex_function_3d x_div_r = complex_factory_3d(world).functor(func).special_level(15).special_points(special_points);
@@ -716,6 +735,7 @@ struct AnsatzBase {
     [[nodiscard]] virtual std::string filename() const {return this->name(); }
     [[nodiscard]] virtual std::string name() const =0;
 
+    int iansatz=0;
     virtual void normalize(Spinor& bra, Spinor& ket) const {
         Metric m;
         if (transform_c) m=M_metric();
@@ -805,6 +825,7 @@ struct Ansatz1 : public AnsatzBase {
 public:
     double nuclear_charge, k;
     Ansatz1(const double nuclear_charge, const int k) : nuclear_charge(nuclear_charge), k(k) {
+        iansatz=1;
         MADNESS_ASSERT(k==1);
     }
     std::string name() const {
@@ -874,6 +895,7 @@ public:
     double nuclear_charge, k;
     double a=1.2;
     Ansatz2(const double nuclear_charge, const int k) : nuclear_charge(nuclear_charge), k(k) {
+        iansatz=2;
         MADNESS_ASSERT(k==1);
     }
     std::string name() const {
@@ -931,17 +953,12 @@ public:
 
     MatrixOperator Rinv(World& world) const {
         const double gamma=compute_gamma(nuclear_charge);
-        const double aa=a;
         const double Z=nuclear_charge;
-        auto ncf_cusp = [&Z,&aa](const coord_3d& r) {
-            return 1.0+(1.0/(aa-1.0))*exp(-aa*Z*r.normf());
-        };
-        auto ncf_singularity = [&gamma](const coord_3d& r) {
-            return std::pow(r.normf(),(gamma-1));
-        };
+        ncf_cusp ncf_cusp1(a,Z);
+        ncf_singularity ncf_singularity1(gamma);
         complex_function_3d r1= exact_has_singularity
-                ? complex_factory_3d(world).functor([&ncf_cusp,&ncf_singularity](const coord_3d& r){return 1.0/(ncf_cusp(r)*ncf_singularity(r));})
-                : complex_factory_3d(world).functor([&ncf_cusp](const coord_3d& r){return 1.0/ncf_cusp(r);});
+                ? complex_factory_3d(world).functor([&ncf_cusp1,&ncf_singularity1](const coord_3d& r){return 1.0/(ncf_cusp1(r.normf())*ncf_singularity1(r.normf()));})
+                : complex_factory_3d(world).functor([&ncf_cusp1](const coord_3d& r){return 1.0/ncf_cusp1(r.normf());});
         double n1=r1.norm2();
         print("norm in Rinv",n1);
         auto r = LocalPotentialOperator<double_complex, 3>(world, "R" , r1);
@@ -981,8 +998,9 @@ public:
         return "v"+std::to_string(version) +"_a" +std::to_string(a);
     }
 
-    Ansatz3(const double nuclear_charge, const int version, const double a, const bool longrange_correction) : nuclear_charge(nuclear_charge),
+    Ansatz3(const double nuclear_charge, const int version, const double a, const bool longrange_correction=false) : nuclear_charge(nuclear_charge),
             version(version), a(a), longrange_correction(longrange_correction) {
+        iansatz=3;
         set_version(version,nuclear_charge);
     }
 
@@ -1095,16 +1113,10 @@ public:
         double_complex fac=prefac* ii *c/nuclear_charge*(gamma-1);
         double Z=nuclear_charge;
         double aa=a;
-        auto ncf_cusp = [&Z,&aa](const coord_3d& r) {
-            if (aa<0.0) return 1.0;
-            return 1.0+(1.0/(aa-1.0))*exp(-aa*Z*r.normf());
-        };
-        auto ncf_singularity = [&gamma](const coord_3d& r) {
-            if (exact_has_singularity) return std::pow(r.normf(),(gamma-1));
-            return 1.0;
-        };
-        auto ncf = [&ncf_singularity,&ncf_cusp](const coord_3d& r) {
-            return ncf_singularity(r)*ncf_cusp(r);
+        ncf_cusp ncf_cusp1(a,Z);
+        ncf_singularity ncf_singularity1(gamma);
+        auto ncf = [&ncf_singularity1,&ncf_cusp1](const coord_3d& r) {
+            return ncf_singularity1(r.normf())*ncf_cusp1(r.normf());
         };
 
         complex_function_3d x1=complex_factory_3d(world).functor([&fac,&ncf](const coord_3d& r){return fac*stepfunction(0)(r) / ncf(r);});
@@ -1290,6 +1302,55 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const int k) {
 
 }
 
+template<typename ansatzT>
+void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
+    exact_has_singularity = true;
+    print("=============================================================");
+    print("Ansatz", ansatz.name());
+    es.print();
+
+    auto Hv = ansatz.make_Hv(world);
+    auto Hd = ansatz.make_Hd(world);
+    auto H = Hv + Hd;
+    H.print("H");
+
+    auto Rinv = ansatz.Rinv(world);
+    Rinv.print("Rinv");
+    auto exact = es.get_spinor(world);
+    ansatz.normalize(exact);
+    auto enorms = norm2s(world, exact.components);
+    print("\n");
+    print("exact component norms (unnormalized)", enorms);
+    Spinor spinor = Rinv(exact);
+    if (ansatz.iansatz == 3) {
+        spinor.components[1]*=0.0;
+        spinor.components[2]*=0.0;
+        spinor.components[3]*=0.0;
+    }
+    Spinor bra = ansatz.make_bra(spinor);
+
+    ansatz.normalize(bra, spinor);
+    auto norms = norm2s(world, spinor.components);
+
+    print("");
+    auto Hspinor = H(spinor);
+    auto hnorms = norm2s(world, Hspinor.components);
+    print("component norms", norms);
+    print("H(spinor) component norms", hnorms);
+    auto en = inner(bra, Hspinor);
+
+    auto diff = Hspinor - en * spinor;
+    spinor.plot("spinor");
+    Hspinor.plot("Hspinor");
+    diff.plot("diff_Hspinor_en_spinor");
+    auto dnorms = norm2s(world, diff.components);
+    print("difference component norms", dnorms);
+    double c=1.0/alpha1;
+    print("energy", en, real(en - c * c), "difference", real(en - c * c) - (es.get_energy() - c * c));
+
+    print("");
+}
+
 int main(int argc, char* argv[]) {
     World& world=initialize(argc,argv);
     if (world.rank()==0) {
@@ -1334,101 +1395,14 @@ int main(int argc, char* argv[]) {
     print("1s energy for Z=",nuclear_charge,": ",energy_exact);
     coord_3d lo({0,0,-.1});
     coord_3d hi({0,0, .1});
-    const int npt=3001;
+    const int npt=1501;
 
-    {
-        exact_has_singularity=true;
-        Ansatz1 ansatz(nuclear_charge,1);
-//        Ansatz3 ansatz(nuclear_charge,1,-1.5,false);
+//    eigenvector_test(world,Ansatz0(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
+//    eigenvector_test(world,Ansatz1(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
+//    eigenvector_test(world,Ansatz2(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
+    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.3),ExactSpinor(1,'S',0.5,nuclear_charge));
+    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.3),ExactSpinor(1,'S',0.5,nuclear_charge));
 
-        print("\n\nAnsatz:",ansatz.name());
-//        ExactSpinor es(1,'S',0.5,nuclear_charge);
-        ExactSpinor es(2,'P',1.5,nuclear_charge);
-        es.print();
-        if (0) {
-            exact_has_singularity=true;
-            ExactSpinor es2(2,'P',1.5,nuclear_charge);
-            Ansatz1 ansatz2(nuclear_charge,1);
-            auto Rinv2=ansatz2.Rinv(world);
-            auto es2_spinor=es2.get_spinor(world);
-            auto exact2=Rinv2(es2_spinor);
-
-            exact_has_singularity=false;
-            ExactSpinor es3(2,'P',1.5,nuclear_charge);
-            Ansatz1 ansatz3(nuclear_charge,1);
-            auto Rinv3=ansatz3.Rinv(world);
-            auto es3_spinor=es3.get_spinor(world);
-            auto exact3=Rinv3(es3_spinor);
-            auto diff=exact2-exact3;
-
-            auto enorms1=norm2s(world,(es2_spinor-es3_spinor).components);
-            print("(no) singularity difference norms (unnormalized)",enorms1);
-            auto enorms=norm2s(world,diff.components);
-            print("singularity difference norms (unnormalized)",enorms);
-
-
-        }
-
-        auto Hv=ansatz.make_Hv(world);
-        auto Hd=ansatz.make_Hd(world);
-        auto H=Hv+Hd;
-        H.print("H");
-
-        auto Rinv=ansatz.Rinv(world);
-        Rinv.print("Rinv");
-        auto exact=es.get_spinor(world);
-        ansatz.normalize(exact);
-        auto enorms=norm2s(world,exact.components);
-        print("\n");
-        print("exact component norms (unnormalized)",enorms);
-        Spinor spinor=Rinv(exact);
-//        spinor.components[2]*=0.0;
-//        spinor.components[3]*=0.0;
-        Spinor bra=ansatz.make_bra(spinor);
-
-        ansatz.normalize(bra,spinor);
-        auto norms=norm2s(world,spinor.components);
-
-
-//        auto guess=ansatz.make_guess(world);
-//        auto guess_bra=ansatz.make_bra(guess);
-//        ansatz.normalize(guess_bra,guess);
-//        auto gnorms=norm2s(world,guess.components);
-//
-//
-//        {
-//            print("");
-//            auto Hguess = H(guess);
-//            auto hgnorms = norm2s(world, Hguess.components);
-//            print("guess component norms", gnorms);
-//            print("H(guess) component norms", hgnorms);
-//            print("H(guess) real component norms", norm2s(world, real(Hguess.components)));
-//            print("H(guess) imag component norms", norm2s(world, imag(Hguess.components)));
-//            auto en1 = inner(guess_bra, Hguess);
-//            auto diff = Hguess - en1 * guess;
-//            diff.plot("diff_Hguess");
-//            auto dnorms = norm2s(world, diff.components);
-//            print("difference component norms", dnorms);
-//            print("guess energy", en1, en1 - c * c, "difference", real(en1 - c * c) - (es.get_energy() - c * c));
-//        }
-
-        print("");
-        auto Hspinor=H(spinor);
-        auto hnorms=norm2s(world,Hspinor.components);
-        print("component norms",norms);
-        print("H(spinor) component norms",hnorms);
-        auto en=inner(bra,Hspinor);
-
-        auto diff=Hspinor-en*spinor;
-        spinor.plot("spinor");
-        Hspinor.plot("Hspinor");
-        diff.plot("diff_Hspinor_en_spinor");
-        auto dnorms=norm2s(world,diff.components);
-        print("difference component norms",dnorms);
-        print("energy",en,real(en-c*c), "difference", real(en-c*c)-(es.get_energy()-c*c));
-
-        print("");
-    }
 
 //    try {
 //        run(world,Ansatz0(nuclear_charge,k),nuclear_charge,k);
