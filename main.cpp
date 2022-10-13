@@ -13,7 +13,7 @@ static bool debug=false;
 static double alpha1=constants::fine_structure_constant;
 static double shift=0.0;
 static bool exact_has_singularity=false;
-static double epsilon=1.e-14;
+static double epsilon=1.e-12;
 
 struct stepfunction {
     int axis=-1;
@@ -354,42 +354,52 @@ MatrixOperator make_Hv(World& world, const double nuclear_charge) {
     return make_Hdiag(world,V1);
 }
 
-/// Hv for ansatz 1
-MatrixOperator make_Hv_reg1(World& world, const double nuclear_charge) {
-    MatrixOperator H;
+/// returns a (4,4) hermition matrix with H=\vec \alpha \vec {xyz}
+MatrixOperator make_alpha_sn(World& world, const LocalPotentialOperator<double_complex, 3>& x,
+                             const LocalPotentialOperator<double_complex, 3>& y,
+                             const LocalPotentialOperator<double_complex, 3>& z,
+                             const bool ll_negative) {
+    MatrixOperator H(4,4);
     const double_complex ii=double_complex(0.0,1.0);
     const double_complex one=double_complex(1.0,0.0);
-    const double alpha=constants::fine_structure_constant;
-    const double c=1.0/alpha;
 
-    /// !!! REGULARIZATION ERROR HERE IS CRITICAL !!!
-    /// !!! KEEP EPSILON SMALL !!!
+    // symmetric is the opposite of hermitian
+    double fac=ll_negative ? -1.0 : 1.0;
 
-    complex_function_3d x_div_r2_f=complex_factory_3d(world).functor([](const coord_3d& r){return r[0]/(inner(r,r)+epsilon);});
-    complex_function_3d y_div_r2_f=complex_factory_3d(world).functor([](const coord_3d& r){return r[1]/(inner(r,r)+epsilon);});
-    complex_function_3d z_div_r2_f=complex_factory_3d(world).functor([](const coord_3d& r){return r[2]/(inner(r,r)+epsilon);});
+    H.add_operator(0, 2, one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
+    H.add_operator(0, 3, one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
+    H.add_operator(0, 3, -ii,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
+
+    H.add_operator(1, 2, one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
+    H.add_operator(1, 2,  ii,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
+    H.add_operator(1, 3,-one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
+
+    H.add_operator(2, 0, one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
+    H.add_operator(2, 1, one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
+    H.add_operator(2, 1, -ii *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
+
+    H.add_operator(3, 0, one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
+    H.add_operator(3, 0,  ii *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
+    H.add_operator(3, 1,-one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
+    return H;
+}
+
+/// Hv for ansatz 1
+MatrixOperator make_Hv_reg1(World& world, const double nuclear_charge) {
+    const double_complex ii=double_complex(0.0,1.0);
+    const double c=1.0/alpha1;
+    double gamma=compute_gamma(nuclear_charge);
+
+    complex_function_3d x_div_r2_f=complex_factory_3d(world).functor([&gamma,&c,&ii](const coord_3d& r){return -c*ii*(gamma-1)*r[0]/(inner(r,r)+epsilon);});
+    complex_function_3d y_div_r2_f=complex_factory_3d(world).functor([&gamma,&c,&ii](const coord_3d& r){return -c*ii*(gamma-1)*r[1]/(inner(r,r)+epsilon);});
+    complex_function_3d z_div_r2_f=complex_factory_3d(world).functor([&gamma,&c,&ii](const coord_3d& r){return -c*ii*(gamma-1)*r[2]/(inner(r,r)+epsilon);});
 
     auto x_div_r2=LocalPotentialOperator<double_complex,3>(world,"x/r2",x_div_r2_f);
     auto y_div_r2=LocalPotentialOperator<double_complex,3>(world,"y/r2",y_div_r2_f);
     auto z_div_r2=LocalPotentialOperator<double_complex,3>(world,"z/r2",z_div_r2_f);
 
-    double gamma=compute_gamma(nuclear_charge);
-    H.add_operator(0,2,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
-    H.add_operator(0,3,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
-    H.add_operator(0,3,-one*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
+    return make_alpha_sn(world,x_div_r2,y_div_r2,z_div_r2,false);
 
-    H.add_operator(1,2,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
-    H.add_operator(1,2,    c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
-    H.add_operator(1,3, ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
-
-    H.add_operator(2,0,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
-    H.add_operator(2,1,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
-    H.add_operator(2,1,-one*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
-
-    H.add_operator(3,0,-ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(x_div_r2));
-    H.add_operator(3,0,    c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(y_div_r2));
-    H.add_operator(3,1, ii*c*(gamma-1),std::make_shared<LocalPotentialOperator<double_complex,3>>(z_div_r2));
-    return H;
 }
 
 /// Hv for ansatz 2
@@ -441,35 +451,6 @@ MatrixOperator make_Hv_reg2(World& world, const double nuclear_charge, const dou
     return H;
 }
 
-/// returns a (4,4) hermition matrix with H=\vec \alpha \vec {xyz}
-MatrixOperator make_alpha_sn(World& world, const LocalPotentialOperator<double_complex, 3>& x,
-                             const LocalPotentialOperator<double_complex, 3>& y,
-                             const LocalPotentialOperator<double_complex, 3>& z,
-                             const bool ll_negative) {
-    MatrixOperator H(4,4);
-    const double_complex ii=double_complex(0.0,1.0);
-    const double_complex one=double_complex(1.0,0.0);
-
-    // symmetric is the opposite of hermitian
-    double fac=ll_negative ? -1.0 : 1.0;
-
-    H.add_operator(0, 2, one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
-    H.add_operator(0, 3, one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
-    H.add_operator(0, 3, -ii,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
-
-    H.add_operator(1, 2, one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
-    H.add_operator(1, 2,  ii,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
-    H.add_operator(1, 3,-one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
-
-    H.add_operator(2, 0, one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
-    H.add_operator(2, 1, one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
-    H.add_operator(2, 1, -ii *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
-
-    H.add_operator(3, 0, one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
-    H.add_operator(3, 0,  ii *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
-    H.add_operator(3, 1,-one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
-    return H;
-}
 
 
 /// the off-diagonal blocks of ansatz 3
@@ -677,8 +658,13 @@ struct ExactSpinor {
         double r=c.normf();
         double rho=2*C*r;
         double radial=exp(-rho*0.5);
-        if (exact_has_singularity) radial*=std::pow(rho,gamma);
-        long kk=(k>0) ? k : -k-1;
+        MADNESS_CHECK(exact_has_singularity);
+        radial*=std::pow(2*C,gamma);
+        double expo1= compute_gamma(Z)-1; // this is gamma(k=1)
+        double expodiff=gamma-1-expo1;
+        radial*=std::pow(r,expodiff);
+        if (exact_has_singularity) radial*=std::pow(r,expo1);
+//        radial*=std::pow(r,gamma-1);
         double g=(n+gamma)*radial;
         double f=Z*alpha1*radial;
         double_complex i={0.0,1.0};
@@ -689,21 +675,21 @@ struct ExactSpinor {
         double_complex ii =std::pow(i,l)*std::pow(-1.0,m+0.5);
         if (component==0) {   // j = l+1/2 : k=-j-0.5 == j=1/2 ; k=-1
             double nn = (l==lround(j-0.5)) ? -sqrt((j+m)/(2.0*j)) : sqrt((j-m+1)/(2*j+2));
-            return ii * g/r * nn *SphericalHarmonics(l,lround(m-0.5))(c);
+            return ii * g * nn *SphericalHarmonics(l,lround(m-0.5))(c);
 //            return g/r * sqrt(double_complex((k + 0.5 - m)/(2.0*k + 1))) *SphericalHarmonics(k,lround(m-0.5))(c);
         } else if (component==1) {
             double nn = (l==lround(j-0.5)) ? sqrt((j-m)/(2.0*j)) : sqrt((j+m+1)/(2*j+2));
-            return ii * g/r * nn *SphericalHarmonics(l,lround(m+0.5))(c);
+            return ii * g * nn *SphericalHarmonics(l,lround(m+0.5))(c);
 //            return -g/r * sgnk* sqrt(double_complex((k + 0.5 + m)/(2.0*k + 1))) *SphericalHarmonics(k,lround(m+0.5))(c);
         } else if (component==2) {
             double nn = (l==lround(j-0.5)) ? sqrt((j-m+1)/(2.0*j+2.0)) : sqrt((j+m)/(2.0*j));
             long ll=  (l==lround(j-0.5))  ? l+1 : l-1;
-            return -ii * i*f/r * nn *SphericalHarmonics(ll,lround(m-0.5))(c);
+            return -ii * i*f * nn *SphericalHarmonics(ll,lround(m-0.5))(c);
 //            return i*f/r * sqrt(double_complex((-k + 0.5 - m)/(-2.0*k + 1))) *SphericalHarmonics(-k,lround(m-0.5))(c);
         } else if (component==3) {
             double nn = (l==lround(j-0.5)) ? sqrt((j+m+1)/(2.0*j+2.0)) : -sqrt((j-m)/(2.0*j));
             long ll=  (l==lround(j-0.5))  ? l+1 : l-1;
-            return ii * i*f/r * nn *SphericalHarmonics(ll,lround(m+0.5))(c);
+            return ii * i*f * nn *SphericalHarmonics(ll,lround(m+0.5))(c);
 //            return -i*f/r * sgnk* sqrt(double_complex((-k + 0.5 - m)/(-2.0*k + 1))) *SphericalHarmonics(-k,lround(m+0.5))(c);
         }
         MADNESS_EXCEPTION("confused component in ExactSpinor",1);
@@ -873,10 +859,11 @@ public:
     MatrixOperator Rinv(World& world) const {
         const double gamma=compute_gamma(nuclear_charge);
 
-        auto func_with_singularity= [&gamma](const coord_3d& r){return std::pow(r.normf(),-(gamma-1));};
-        auto func_without_singularity= [&gamma](const coord_3d& r){return 1.0;};
-        complex_function_3d r1= exact_has_singularity ? complex_factory_3d(world).functor(func_with_singularity)
-                : complex_factory_3d(world).functor(func_without_singularity);
+        auto ncf = [&gamma](const coord_3d& r){
+            if (exact_has_singularity) return std::pow(r.normf(),-(gamma-1));
+            return 1.0;
+        };
+        complex_function_3d r1 = complex_factory_3d(world).functor(ncf);
         auto r = LocalPotentialOperator<double_complex, 3>(world, "Rinv" , r1);
         return make_Hdiag(world,r);
     }
@@ -1355,8 +1342,32 @@ int main(int argc, char* argv[]) {
 //        Ansatz3 ansatz(nuclear_charge,1,-1.5,false);
 
         print("\n\nAnsatz:",ansatz.name());
-        ExactSpinor es(1,'S',0.5,nuclear_charge);
+//        ExactSpinor es(1,'S',0.5,nuclear_charge);
+        ExactSpinor es(2,'P',1.5,nuclear_charge);
         es.print();
+        if (0) {
+            exact_has_singularity=true;
+            ExactSpinor es2(2,'P',1.5,nuclear_charge);
+            Ansatz1 ansatz2(nuclear_charge,1);
+            auto Rinv2=ansatz2.Rinv(world);
+            auto es2_spinor=es2.get_spinor(world);
+            auto exact2=Rinv2(es2_spinor);
+
+            exact_has_singularity=false;
+            ExactSpinor es3(2,'P',1.5,nuclear_charge);
+            Ansatz1 ansatz3(nuclear_charge,1);
+            auto Rinv3=ansatz3.Rinv(world);
+            auto es3_spinor=es3.get_spinor(world);
+            auto exact3=Rinv3(es3_spinor);
+            auto diff=exact2-exact3;
+
+            auto enorms1=norm2s(world,(es2_spinor-es3_spinor).components);
+            print("(no) singularity difference norms (unnormalized)",enorms1);
+            auto enorms=norm2s(world,diff.components);
+            print("singularity difference norms (unnormalized)",enorms);
+
+
+        }
 
         auto Hv=ansatz.make_Hv(world);
         auto Hd=ansatz.make_Hd(world);
@@ -1366,33 +1377,40 @@ int main(int argc, char* argv[]) {
         auto Rinv=ansatz.Rinv(world);
         Rinv.print("Rinv");
         auto exact=es.get_spinor(world);
+        ansatz.normalize(exact);
         auto enorms=norm2s(world,exact.components);
         print("\n");
         print("exact component norms (unnormalized)",enorms);
         Spinor spinor=Rinv(exact);
+//        spinor.components[2]*=0.0;
+//        spinor.components[3]*=0.0;
         Spinor bra=ansatz.make_bra(spinor);
 
         ansatz.normalize(bra,spinor);
         auto norms=norm2s(world,spinor.components);
 
 
-        auto guess=ansatz.make_guess(world);
-        auto guess_bra=ansatz.make_bra(guess);
-        ansatz.normalize(guess_bra,guess);
-        auto gnorms=norm2s(world,guess.components);
-
-
-        print("");
-        auto Hguess=H(guess);
-        auto hgnorms=norm2s(world,Hguess.components);
-        print("guess component norms",gnorms);
-        print("H(guess) component norms",hgnorms);
-        auto en1=inner(guess_bra,Hguess);
-        auto diff=Hguess-en1*guess;
-        diff.plot("diff_Hguess");
-        auto dnorms=norm2s(world,diff.components);
-        print("difference component norms",dnorms);
-        print("guess energy",en1,en1-c*c, "difference",real(en1-c*c)-(es.get_energy()-c*c));
+//        auto guess=ansatz.make_guess(world);
+//        auto guess_bra=ansatz.make_bra(guess);
+//        ansatz.normalize(guess_bra,guess);
+//        auto gnorms=norm2s(world,guess.components);
+//
+//
+//        {
+//            print("");
+//            auto Hguess = H(guess);
+//            auto hgnorms = norm2s(world, Hguess.components);
+//            print("guess component norms", gnorms);
+//            print("H(guess) component norms", hgnorms);
+//            print("H(guess) real component norms", norm2s(world, real(Hguess.components)));
+//            print("H(guess) imag component norms", norm2s(world, imag(Hguess.components)));
+//            auto en1 = inner(guess_bra, Hguess);
+//            auto diff = Hguess - en1 * guess;
+//            diff.plot("diff_Hguess");
+//            auto dnorms = norm2s(world, diff.components);
+//            print("difference component norms", dnorms);
+//            print("guess energy", en1, en1 - c * c, "difference", real(en1 - c * c) - (es.get_energy() - c * c));
+//        }
 
         print("");
         auto Hspinor=H(spinor);
@@ -1401,8 +1419,11 @@ int main(int argc, char* argv[]) {
         print("H(spinor) component norms",hnorms);
         auto en=inner(bra,Hspinor);
 
-        diff=Hspinor-en*spinor;
-        dnorms=norm2s(world,diff.components);
+        auto diff=Hspinor-en*spinor;
+        spinor.plot("spinor");
+        Hspinor.plot("Hspinor");
+        diff.plot("diff_Hspinor_en_spinor");
+        auto dnorms=norm2s(world,diff.components);
         print("difference component norms",dnorms);
         print("energy",en,real(en-c*c), "difference", real(en-c*c)-(es.get_energy()-c*c));
 
