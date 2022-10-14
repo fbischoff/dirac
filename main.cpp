@@ -13,14 +13,14 @@ static bool debug=false;
 static double alpha1=constants::fine_structure_constant;
 static double shift=0.0;
 static bool exact_has_singularity=false;
-static double epsilon=1.e-12;
+static double epsilon=1.e-10;
 
 struct stepfunction {
     int axis=-1;
     stepfunction(const int axis) : axis(axis) {
         MADNESS_CHECK(axis>=0 && axis<3);
     }
-    double operator()(const coord_3d& r) { return r[axis]/(r.normf()+epsilon); }
+    double operator()(const coord_3d& r) const { return r[axis]/(r.normf()+epsilon); }
 };
 
 struct ncf_cusp {
@@ -47,7 +47,7 @@ struct ncf_singularity {
     double gamma=0.0;
     ncf_singularity(double gamma) : gamma(gamma) {}
     double operator()(const double& r) const {
-        return std::pow(r,gamma-1.0);
+        return 1.0/(std::pow(r,1.0-gamma)+epsilon);
     }
 };
 
@@ -68,11 +68,17 @@ struct SphericalHarmonics{
         const double y=xyz[1];
         const double z=xyz[2];
         const double_complex i=double_complex(0.0,1.0);
+        auto stepx=stepfunction(0);
+        auto stepy=stepfunction(1);
+        auto stepz=stepfunction(2);
         if ((l==0) and (m== 0)) return 0.5*sqrt(1.0/constants::pi);
 
-        if ((l==1) and (m==-1)) return 0.5*sqrt(1.5/constants::pi) * (x - i*y)/r;
-        if ((l==1) and (m== 0)) return 0.5*sqrt(3.0/constants::pi) * z/r;
-        if ((l==1) and (m== 1)) return -0.5*sqrt(1.5/constants::pi) * (x + i*y)/r;
+//        if ((l==1) and (m==-1)) return 0.5*sqrt(1.5/constants::pi) * (x - i*y)/r;
+//        if ((l==1) and (m== 0)) return 0.5*sqrt(3.0/constants::pi) * z/r;
+//        if ((l==1) and (m== 1)) return -0.5*sqrt(1.5/constants::pi) * (x + i*y)/r;
+        if ((l==1) and (m==-1)) return 0.5*sqrt(1.5/constants::pi) * (stepx(xyz) - i *stepy(xyz));
+        if ((l==1) and (m== 0)) return 0.5*sqrt(3.0/constants::pi) * stepz(xyz);
+        if ((l==1) and (m== 1)) return -0.5*sqrt(1.5/constants::pi) * (stepx(xyz) + i *stepy(xyz));
 
         if ((l==2) and (m==-2)) return  0.25*sqrt(7.5/constants::pi) * std::pow((x - i*y)/r,2.0);
         if ((l==2) and (m==-1)) return  0.5 *sqrt(7.5/constants::pi) * (x - i*y)*z/r2;
@@ -129,6 +135,7 @@ public:
 
     vecfuncT operator()(const vecfuncT& vket) const {
         auto gradop = free_space_derivative<T,NDIM>(world, axis);
+        gradop.set_ble1();
         vecfuncT dvket=apply(world, gradop, vket, false);
         world.gop.fence();
         return dvket;
@@ -526,12 +533,12 @@ MatrixOperator make_Hv_reg3_snZ(World& world, const double nuclear_charge, const
     auto y_div_rexp = LocalPotentialOperator<double_complex, 3>(world, "y/r" + extraname, y_div_r);
     auto z_div_rexp = LocalPotentialOperator<double_complex, 3>(world, "z/r" + extraname, z_div_r);
 
-    std::string filename = "sn_slater";
-    coord_3d lo({0, 0, -3});
-    coord_3d hi({0, 0, 3});
-    const int npt = 3001;
-    plot_line(filename.c_str(), npt, lo, hi, real(x_div_r), real(y_div_r), real(z_div_r));
-    plot_plane(world, real(x_div_r), real(y_div_r), real(z_div_r), filename);
+//    std::string filename = "sn_slater";
+//    coord_3d lo({0, 0, -3});
+//    coord_3d hi({0, 0, 3});
+//    const int npt = 3001;
+//    plot_line(filename.c_str(), npt, lo, hi, real(x_div_r), real(y_div_r), real(z_div_r));
+//    plot_plane(world, real(x_div_r), real(y_div_r), real(z_div_r), filename);
 
     return make_alpha_sn(world,x_div_rexp, y_div_rexp, z_div_rexp,true);
 }
@@ -677,13 +684,24 @@ struct ExactSpinor {
         double r=c.normf();
         double rho=2*C*r;
         double radial=exp(-rho*0.5);
-        MADNESS_CHECK(exact_has_singularity);
         radial*=std::pow(2*C,gamma);
-        double expo1= compute_gamma(Z)-1; // this is gamma(k=1)
-        double expodiff=gamma-1-expo1;
-        radial*=std::pow(r,expodiff);
-        if (exact_has_singularity) radial*=std::pow(r,expo1);
-//        radial*=std::pow(r,gamma-1);
+        bool state_has_singularity= (k*k==1);
+
+        if (exact_has_singularity) {
+            if (state_has_singularity) {
+                ncf_singularity ncf_s(compute_gamma(Z));
+                radial *= ncf_s(r);
+            } else {
+                radial *= std::pow(r,gamma-1);          // exponent is positive
+            }
+        } else {
+            if (k*k==1) {   // for an 1S state don't do anything
+                radial*=1.0;
+            } else {        // for an n=2 state gamma>gamma1, so the exponent is positive
+                double gamma1=compute_gamma(Z);
+                radial *=std::pow(r,gamma-1.0 - (gamma1-1.0));
+            }
+        }
         double g=(n+gamma)*radial;
         double f=Z*alpha1*radial;
         double_complex i={0.0,1.0};
@@ -1116,7 +1134,8 @@ public:
         ncf_cusp ncf_cusp1(a,Z);
         ncf_singularity ncf_singularity1(gamma);
         auto ncf = [&ncf_singularity1,&ncf_cusp1](const coord_3d& r) {
-            return ncf_singularity1(r.normf())*ncf_cusp1(r.normf());
+            if (exact_has_singularity) return ncf_singularity1(r.normf())*ncf_cusp1(r.normf());
+            return ncf_cusp1(r.normf());
         };
 
         complex_function_3d x1=complex_factory_3d(world).functor([&fac,&ncf](const coord_3d& r){return fac*stepfunction(0)(r) / ncf(r);});
@@ -1304,35 +1323,53 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const int k) {
 
 template<typename ansatzT>
 void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
-    exact_has_singularity = true;
+    exact_has_singularity = false;
     print("=============================================================");
     print("Ansatz", ansatz.name());
+    print("exact spinor has a singularity ",exact_has_singularity);
     es.print();
 
     auto Hv = ansatz.make_Hv(world);
     auto Hd = ansatz.make_Hd(world);
     auto H = Hv + Hd;
     H.print("H");
+    Hd.print("Hd");
 
     auto Rinv = ansatz.Rinv(world);
     Rinv.print("Rinv");
     auto exact = es.get_spinor(world);
     ansatz.normalize(exact);
+    exact.plot("exact");
     auto enorms = norm2s(world, exact.components);
     print("\n");
     print("exact component norms (unnormalized)", enorms);
     Spinor spinor = Rinv(exact);
-    if (ansatz.iansatz == 3) {
-        spinor.components[1]*=0.0;
-        spinor.components[2]*=0.0;
-        spinor.components[3]*=0.0;
-    }
+//    if (ansatz.iansatz == 3) {
+//        spinor.components[1]*=0.0;
+//        spinor.components[2]*=0.0;
+//        spinor.components[3]*=0.0;
+//    }
     Spinor bra = ansatz.make_bra(spinor);
+    if (0) {
+        Derivative<double_complex,3> dx(world,0);
+        Derivative<double_complex,3> dy(world,1);
+        Derivative<double_complex,3> dz(world,2);
+        auto dxspinor_abgv=Spinor(apply(world,dx,spinor.components));
+        dxspinor_abgv.plot("dxspinor_abgv");
+        dx.set_bspline1();
+        auto dxspinor_bspline=Spinor(apply(world,dx,spinor.components));
+        dxspinor_bspline.plot("dxspinor_bspline");
+        dx.set_ble1();
+        auto dxspinor_ble=Spinor(apply(world,dx,spinor.components));
+        dxspinor_ble.plot("dxspinor_ble");
+    }
 
     ansatz.normalize(bra, spinor);
     auto norms = norm2s(world, spinor.components);
 
     print("");
+    auto Hdspinor = Hd(spinor);
+    auto Hvspinor = Hv(spinor);
     auto Hspinor = H(spinor);
     auto hnorms = norm2s(world, Hspinor.components);
     print("component norms", norms);
@@ -1342,12 +1379,13 @@ void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
     auto diff = Hspinor - en * spinor;
     spinor.plot("spinor");
     Hspinor.plot("Hspinor");
+    Hdspinor.plot("Hdspinor");
+    Hvspinor.plot("Hvspinor");
     diff.plot("diff_Hspinor_en_spinor");
     auto dnorms = norm2s(world, diff.components);
     print("difference component norms", dnorms);
     double c=1.0/alpha1;
-    print("energy", en, real(en - c * c), "difference", real(en - c * c) - (es.get_energy() - c * c));
-
+    print("energy", en, real(en - c * c), "difference", real(en - c * c) - (es.get_energy() - c * c));print("");
     print("");
 }
 
@@ -1393,15 +1431,13 @@ int main(int argc, char* argv[]) {
     print("gamma",gamma);
     double energy_exact=gamma*c*c - c*c;
     print("1s energy for Z=",nuclear_charge,": ",energy_exact);
-    coord_3d lo({0,0,-.1});
-    coord_3d hi({0,0, .1});
-    const int npt=1501;
 
 //    eigenvector_test(world,Ansatz0(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz1(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz2(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
-    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.3),ExactSpinor(1,'S',0.5,nuclear_charge));
-    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.3),ExactSpinor(1,'S',0.5,nuclear_charge));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.3),ExactSpinor(1,'S',0.5,nuclear_charge));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.2),ExactSpinor(2,'P',1.5,nuclear_charge));
+    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.2),ExactSpinor(1,'S',0.5,nuclear_charge));
 
 
 //    try {
