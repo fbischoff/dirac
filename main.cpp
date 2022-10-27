@@ -51,6 +51,17 @@ struct ncf_singularity {
     }
 };
 
+struct ncf {
+    ncf_singularity ncfs;
+    ncf_cusp ncfc;
+    ncf(double gamma, double a, double Z) : ncfs(gamma), ncfc(a,Z) {}
+    double operator()(const coord_3d& r) const {
+        double rr=r.normf();
+        return ncfs(rr) * ncfc(rr);
+    }
+
+};
+
 /// returns the complex value of a given spherical harmonic
 struct SphericalHarmonics{
     long l, m;
@@ -91,6 +102,29 @@ struct SphericalHarmonics{
     }
 
 };
+
+struct Omega {
+    long k, component;
+    double m;
+    Omega(const long k, const double m, const double component) : k(k), m(m), component(component) {
+        MADNESS_CHECK(component==0 or component==1);
+    }
+    double_complex operator()(const coord_3d& xyz) const {
+        double sgnk= (k>0) ? 1.0 : -1.0;
+        double_complex result;
+        if (component==0) {
+            double nn=sqrt((k+0.5-m)/(2*k+1));
+            auto Y=SphericalHarmonics(k,lround(m-0.5));
+            result=nn*Y(xyz);
+        } else if (component==1) {
+            double nn=sqrt((k+0.5+m)/(2*k+1));
+            auto Y=SphericalHarmonics(k,lround(m+0.5));
+            result=-sgnk*nn*Y(xyz);
+        }
+        return result;
+    }
+};
+
 
 double compute_gamma(const double nuclear_charge) {
     return sqrt(1-nuclear_charge*nuclear_charge*alpha1*alpha1);
@@ -135,10 +169,116 @@ public:
 
     vecfuncT operator()(const vecfuncT& vket) const {
         auto gradop = free_space_derivative<T,NDIM>(world, axis);
-        gradop.set_ble1();
+//        gradop.set_ble1();
         vecfuncT dvket=apply(world, gradop, vket, false);
         world.gop.fence();
         return dvket;
+    }
+
+    T operator()(const functionT& bra, const functionT& ket) const {
+        vecfuncT vbra(1,bra), vket(1,ket);
+        Tensor<T> tmat=this->operator()(vbra,vket);
+        return tmat(0l,0l);
+    }
+
+    tensorT operator()(const vecfuncT& vbra, const vecfuncT& vket) const {
+        const auto bra_equiv_ket = &vbra == &vket;
+        vecfuncT dvket=this->operator()(vket);
+        return matrix_inner(world,vbra,dvket, bra_equiv_ket);
+    }
+
+private:
+    World& world;
+    int axis;
+};
+
+template<typename T, std::size_t NDIM>
+class n_times_n_dot_p_minus_p : public SCFOperatorBase<T,NDIM> {
+    typedef Function<T,NDIM> functionT;
+    typedef std::vector<functionT> vecfuncT;
+    typedef Tensor<T> tensorT;
+
+public:
+
+    n_times_n_dot_p_minus_p(World& world, const int axis1) : world(world), axis(axis1) {}
+
+    std::string info() const {return "n"+std::to_string(axis)+" * n.p";}
+
+    functionT operator()(const functionT& ket) const {
+        vecfuncT vket(1,ket);
+        return this->operator()(vket)[0];
+    }
+
+    vecfuncT operator()(const vecfuncT& vket) const {
+        auto D0 = free_space_derivative<T,NDIM>(world,0);
+        auto D1 = free_space_derivative<T,NDIM>(world,1);
+        auto D2 = free_space_derivative<T,NDIM>(world,2);
+        auto Daxis = free_space_derivative<T,NDIM>(world,axis);
+//        D0.set_ble1();
+//        D1.set_ble1();
+//        D2.set_ble1();
+        world.gop.fence();
+        const long axis1=axis;
+        real_function_3d n0=real_factory_3d(world).functor([](const coord_3d& r){return stepfunction(0)(r);});
+        real_function_3d n1=real_factory_3d(world).functor([](const coord_3d& r){return stepfunction(1)(r);});
+        real_function_3d n2=real_factory_3d(world).functor([](const coord_3d& r){return stepfunction(2)(r);});
+        real_function_3d naxis=real_factory_3d(world).functor([&axis1](const coord_3d& r){return stepfunction(axis1)(r);});
+
+        auto result=naxis * (n0 * apply(world,D0,vket) + n1 * apply(world,D1,vket) + n2*apply(world,D2,vket)) - apply(world,Daxis,vket);
+        return truncate(result);
+    }
+
+    T operator()(const functionT& bra, const functionT& ket) const {
+        vecfuncT vbra(1,bra), vket(1,ket);
+        Tensor<T> tmat=this->operator()(vbra,vket);
+        return tmat(0l,0l);
+    }
+
+    tensorT operator()(const vecfuncT& vbra, const vecfuncT& vket) const {
+        const auto bra_equiv_ket = &vbra == &vket;
+        vecfuncT dvket=this->operator()(vket);
+        return matrix_inner(world,vbra,dvket, bra_equiv_ket);
+    }
+
+private:
+    World& world;
+    int axis;
+};
+
+template<typename T, std::size_t NDIM>
+class AngularMomentum_with_step : public SCFOperatorBase<T,NDIM> {
+    typedef Function<T,NDIM> functionT;
+    typedef std::vector<functionT> vecfuncT;
+    typedef Tensor<T> tensorT;
+
+public:
+
+    AngularMomentum_with_step(World& world, const int axis1) : world(world), axis(axis1) {}
+
+    std::string info() const {return "1/r L"+std::to_string(axis);}
+
+    functionT operator()(const functionT& ket) const {
+        vecfuncT vket(1,ket);
+        return this->operator()(vket)[0];
+    }
+
+    vecfuncT operator()(const vecfuncT& vket) const {
+        // if axis==0 -> lx = y pz - z py etc
+        int index1=(axis+1)%3;
+        int index2=(axis+2)%3;
+        auto gradop1 = free_space_derivative<T,NDIM>(world,index1);
+        auto gradop2 = free_space_derivative<T,NDIM>(world,index2);
+//        gradop1.set_ble1();
+//        gradop2.set_ble1();
+        const double_complex ii={0.0,1.0};
+        vecfuncT p1=-ii*apply(world, gradop1, vket);
+        vecfuncT p2=-ii*apply(world, gradop2, vket);
+        world.gop.fence();
+        real_function_3d r1=real_factory_3d(world).functor([&index1](const coord_3d& r){return stepfunction(index1)(r);});
+        real_function_3d r2=real_factory_3d(world).functor([&index2](const coord_3d& r){return stepfunction(index2)(r);});
+
+        auto result=r1*p2 - r2*p1;
+        return result;
     }
 
     T operator()(const functionT& bra, const functionT& ket) const {
@@ -197,6 +337,25 @@ public:
     Spinor& truncate() {
         madness::truncate(components);
         return *this;
+    }
+
+    void print_norms(std::string text) {
+        auto norms = norm2s(world(), components);
+//        auto realnorms = norm2s(world(), real(components));
+//        auto imagnorms = norm2s(world(), imag(components));
+//        real_function_3d x=real_factory_3d(world()).functor([](const coord_3d& r) {return r[0];});
+//        real_function_3d y=real_factory_3d(world()).functor([](const coord_3d& r) {return r[1];});
+//        real_function_3d z=real_factory_3d(world()).functor([](const coord_3d& r) {return r[2];});
+//        auto x1=inner(this->components,x*(this->components));
+//        auto y1=inner(this->components,y*(this->components));
+//        auto z1=inner(this->components,z*(this->components));
+//        auto x2=inner(this->components,x*x*(this->components));
+//        auto y2=inner(this->components,y*y*(this->components));
+//        auto z2=inner(this->components,z*z*(this->components));
+        print(text,norms);
+//        print("  -- real,imag",realnorms,imagnorms);
+//        print("  -- moments  ",x1,y1,z1,x2,y2,z2);
+        plot(text);
     }
 
     void plot(const std::string filename) const {
@@ -419,6 +578,46 @@ MatrixOperator make_alpha_sn(World& world, const LocalPotentialOperator<double_c
     return H;
 }
 
+/// returns a (2,2) matrix: i(gamma_1 - 1) c 1/r \vec\sigma\vec n \vec \sigma l
+MatrixOperator make_snsl(World& world,const double Z) {
+    MatrixOperator sp(2,2);
+    const double_complex ii=double_complex(0.0,1.0);
+    const double gamma1=compute_gamma(Z);
+    double_complex prefac=(gamma1-1.0)*ii/alpha1;
+    auto ox=n_times_n_dot_p_minus_p<double_complex,3>(world,0);
+    auto oy=n_times_n_dot_p_minus_p<double_complex,3>(world,1);
+    auto oz=n_times_n_dot_p_minus_p<double_complex,3>(world,2);
+
+    sp.add_operator(0,0,    prefac,std::make_shared<n_times_n_dot_p_minus_p<double_complex,3>>(oz));
+    sp.add_operator(0,1,    prefac,std::make_shared<n_times_n_dot_p_minus_p<double_complex,3>>(ox));
+    sp.add_operator(0,1,-ii*prefac,std::make_shared<n_times_n_dot_p_minus_p<double_complex,3>>(oy));
+
+    sp.add_operator(1,0,    prefac,std::make_shared<n_times_n_dot_p_minus_p<double_complex,3>>(ox));
+    sp.add_operator(1,0, ii*prefac,std::make_shared<n_times_n_dot_p_minus_p<double_complex,3>>(oy));
+    sp.add_operator(1,1,   -prefac,std::make_shared<n_times_n_dot_p_minus_p<double_complex,3>>(oz));
+    return sp;
+}
+
+
+
+/// returns a (2,2) matrix: Z/r \vec\sigma\vec l
+MatrixOperator make_Zrsl(World& world, const double Z) {
+    MatrixOperator sp(2,2);
+    const double_complex ii=double_complex(0.0,1.0);
+    auto lx=AngularMomentum_with_step<double_complex,3>(world,0);
+    auto ly=AngularMomentum_with_step<double_complex,3>(world,1);
+    auto lz=AngularMomentum_with_step<double_complex,3>(world,2);
+
+    sp.add_operator(0,0,    Z,std::make_shared<AngularMomentum_with_step<double_complex,3>>(lz));
+    sp.add_operator(0,1,    Z,std::make_shared<AngularMomentum_with_step<double_complex,3>>(lx));
+    sp.add_operator(0,1,-ii*Z,std::make_shared<AngularMomentum_with_step<double_complex,3>>(ly));
+
+    sp.add_operator(1,0,    Z,std::make_shared<AngularMomentum_with_step<double_complex,3>>(lx));
+    sp.add_operator(1,0, ii*Z,std::make_shared<AngularMomentum_with_step<double_complex,3>>(ly));
+    sp.add_operator(1,1,   -Z,std::make_shared<AngularMomentum_with_step<double_complex,3>>(lz));
+    return sp;
+}
+
 /// Hv for ansatz 1
 MatrixOperator make_Hv_reg1(World& world, const double nuclear_charge) {
     const double_complex ii=double_complex(0.0,1.0);
@@ -545,7 +744,19 @@ MatrixOperator make_Hv_reg3_snZ(World& world, const double nuclear_charge, const
 
 /// Hv for ansatz 3
 MatrixOperator make_Hv_reg3_version1(World& world, const double nuclear_charge, const double aa, const bool lr_correction) {
-    MatrixOperator H=make_Hv_reg3_snZ(world,nuclear_charge,aa,lr_correction);
+
+    MatrixOperator Hz=make_Hv_reg3_snZ(world,nuclear_charge,aa,lr_correction);
+
+    MatrixOperator sl_matrix;
+    auto sl= make_Zrsl(world,nuclear_charge);
+    sl_matrix.add_submatrix(0, 0, sl);
+    sl_matrix.add_submatrix(2, 2, sl);
+
+    MatrixOperator snsl_matrix;
+    auto snsl=make_snsl(world,nuclear_charge);
+    snsl_matrix.add_submatrix(0, 2, snsl);
+    snsl_matrix.add_submatrix(2, 0, snsl);
+
 
     double gamma = compute_gamma(nuclear_charge);
     double c=1.0/alpha1;
@@ -554,10 +765,16 @@ MatrixOperator make_Hv_reg3_version1(World& world, const double nuclear_charge, 
             [&c](const coord_3d& r) { return c*c*double_complex(1.0, 0.0); });
     auto V1 = LocalPotentialOperator<double_complex, 3>(world, "(gamma-1) -- c2", V);
     auto V2 = LocalPotentialOperator<double_complex, 3>(world, "-(gamma-1) -- c2", V);
-    H.add_operator(0, 0,  (gamma - 1.0) , std::make_shared<LocalPotentialOperator<double_complex, 3>>(V1));
-    H.add_operator(1, 1,  (gamma - 1.0) , std::make_shared<LocalPotentialOperator<double_complex, 3>>(V1));
-    H.add_operator(2, 2, -(gamma - 1.0) , std::make_shared<LocalPotentialOperator<double_complex, 3>>(V2));
-    H.add_operator(3, 3, -(gamma - 1.0) , std::make_shared<LocalPotentialOperator<double_complex, 3>>(V2));
+    MatrixOperator diagonal;
+    diagonal.add_operator(0, 0,  (gamma - 1.0) , std::make_shared<LocalPotentialOperator<double_complex, 3>>(V1));
+    diagonal.add_operator(1, 1,  (gamma - 1.0) , std::make_shared<LocalPotentialOperator<double_complex, 3>>(V1));
+    diagonal.add_operator(2, 2, -(gamma - 1.0) , std::make_shared<LocalPotentialOperator<double_complex, 3>>(V2));
+    diagonal.add_operator(3, 3, -(gamma - 1.0) , std::make_shared<LocalPotentialOperator<double_complex, 3>>(V2));
+    diagonal.print("diagonal");
+    Hz.print("Hz");
+    sl_matrix.print("sl_matrix");
+    snsl_matrix.print("snsl_matrix");
+    MatrixOperator H = diagonal + Hz + sl_matrix + snsl_matrix;
     return H;
 }
 
@@ -579,7 +796,6 @@ MatrixOperator make_Hv_reg3_version3(World& world, const double nuclear_charge, 
     return H;
 
 }
-
 
 
 
@@ -640,6 +856,7 @@ struct ExactSpinor {
     long n, k, l;
     mutable int component=0;
     double E, C, gamma, Z, j, m;
+    bool compute_F=false;
     ExactSpinor(const int n, const char lc, const double j, const int Z)
         : ExactSpinor(n, l_char_to_int(lc),j,Z) { }
     ExactSpinor(const int n, const int l, const double j, const int Z)
@@ -677,30 +894,50 @@ struct ExactSpinor {
         MADNESS_CHECK(l<3);
         madness::print("term symbol",n,lc,j);
         madness::print("energy = ",E, E-1.0/(alpha1*alpha1));
+        madness::print("compute_F",compute_F);
     }
 
-
     double_complex operator()(const coord_3d& c) const {
+        if (compute_F) return Fvalue(c);
+        else return psivalue(c);
+    }
+
+    double_complex Fvalue(const coord_3d& c) const {
+        double r=c.normf();
+        double rho=2*C*r;
+        double gamma1= compute_gamma(Z);
+        double radial=exp(-rho*0.5);
+        if (k*k>1) radial*=std::pow(rho,gamma-gamma1);
+
+        double_complex i={0.0,1.0};
+        double large=(gamma1 + 1)*((gamma + n) - (gamma1 -1));
+        double_complex small=i*Z*alpha1 * ((gamma1 + 1) - (gamma + n));
+
+        if (component==0) {
+            return radial * large * Omega(k,m,0)(c);
+        } else if (component==1) {
+            return radial * large * Omega(k,m,1)(c);
+        } else if (component==2) {
+            return radial * small * Omega(-k,m,0)(c);
+        } else if (component==3) {
+            return radial * small * Omega(-k,m,1)(c);
+        }
+        MADNESS_EXCEPTION("confused component in ExactSpinor::Fvalue",1);
+        return 0.0;
+    }
+
+    double_complex psivalue(const coord_3d& c) const {
         double r=c.normf();
         double rho=2*C*r;
         double radial=exp(-rho*0.5);
         radial*=std::pow(2*C,gamma);
         bool state_has_singularity= (k*k==1);
 
-        if (exact_has_singularity) {
-            if (state_has_singularity) {
-                ncf_singularity ncf_s(compute_gamma(Z));
-                radial *= ncf_s(r);
-            } else {
-                radial *= std::pow(r,gamma-1);          // exponent is positive
-            }
+        if (state_has_singularity) {
+            ncf_singularity ncf_s(compute_gamma(Z));
+            radial *= ncf_s(r);
         } else {
-            if (k*k==1) {   // for an 1S state don't do anything
-                radial*=1.0;
-            } else {        // for an n=2 state gamma>gamma1, so the exponent is positive
-                double gamma1=compute_gamma(Z);
-                radial *=std::pow(r,gamma-1.0 - (gamma1-1.0));
-            }
+            radial *= std::pow(r,gamma-1);          // exponent is positive
         }
         double g=(n+gamma)*radial;
         double f=Z*alpha1*radial;
@@ -1075,22 +1312,20 @@ public:
     /// turns argument into its bra form: (r^(\gamma-1))^2
     Spinor make_bra(const Spinor& ket) const {
         World& world=ket.world();
-        const double alpha=constants::fine_structure_constant;
         const double gamma= compute_gamma(nuclear_charge);
-        const double n=1;
-        const double C=nuclear_charge/n;
-        const double Z=nuclear_charge;
-        const double aa=a;
-        coord_3d sp{0.0,0.0,0.0};
-        std::vector<coord_3d> special_points(1,sp);
+
+        ncf_cusp ncf_cusp1(a,nuclear_charge);
+        ncf_singularity ncf_singularity1(gamma);
+        auto ncf = [&ncf_singularity1,&ncf_cusp1](const coord_3d& r) {
+            if (exact_has_singularity) return ncf_singularity1(r.normf())*ncf_cusp1(r.normf());
+            return ncf_cusp1(r.normf());
+        };
+
         real_function_3d r2=real_factory_3d(world)
-                .functor([&gamma, &Z, &aa](const coord_3d& r){
-                    double R=std::pow(r.normf(),(gamma-1));
-                    if (aa>0.0) R=R*(1.0+ 1.0/(aa-1.0)*exp(-aa*Z*r.normf()));
-//                    double R=std::pow(r.normf(),(gamma-1)) * (1.0+1.0/(aa-1.0)*  exp(-aa*C*r.normf()));
+                .functor([&ncf,&gamma](const coord_3d& r){
+                    double R=ncf(r);
                     return 2.0*R*R/(gamma+1.0);
-                })
-                .special_level(15).special_points(special_points);
+                });
         Spinor result=Spinor(r2*ket.components);
         return result;
     }
@@ -1323,11 +1558,15 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const int k) {
 
 template<typename ansatzT>
 void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
-    exact_has_singularity = false;
+    exact_has_singularity = true;
     print("=============================================================");
     print("Ansatz", ansatz.name());
     print("exact spinor has a singularity ",exact_has_singularity);
+    es.compute_F=true;
     es.print();
+    auto exactF = es.get_spinor(world);
+//    ansatz.normalize(exactF);
+    exactF.plot("exactF");
 
     auto Hv = ansatz.make_Hv(world);
     auto Hd = ansatz.make_Hd(world);
@@ -1335,55 +1574,71 @@ void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
     H.print("H");
     Hd.print("Hd");
 
-    auto Rinv = ansatz.Rinv(world);
-    Rinv.print("Rinv");
-    auto exact = es.get_spinor(world);
-    ansatz.normalize(exact);
-    exact.plot("exact");
-    auto enorms = norm2s(world, exact.components);
-    print("\n");
-    print("exact component norms (unnormalized)", enorms);
-    Spinor spinor = Rinv(exact);
-//    if (ansatz.iansatz == 3) {
-//        spinor.components[1]*=0.0;
-//        spinor.components[2]*=0.0;
-//        spinor.components[3]*=0.0;
-//    }
-    Spinor bra = ansatz.make_bra(spinor);
+    Spinor spinor = copy(exactF);
+//    ansatz.normalize(spinor);
+
+    MatrixOperator snZ_matrix= make_Hv_reg3_snZ(world,ansatz.nuclear_charge,ansatz.a,false);
+
+    MatrixOperator sl_matrix;
+    auto sl= make_Zrsl(world,ansatz.nuclear_charge);
+    sl_matrix.add_submatrix(0, 0, sl);
+    sl_matrix.add_submatrix(2, 2, sl);
+
+    MatrixOperator snsl_matrix;
+    auto snsl=make_snsl(world,ansatz.nuclear_charge);
+    snsl_matrix.add_submatrix(0, 2, snsl);
+    snsl_matrix.add_submatrix(2, 0, snsl);
+
+    auto snsl_spinor=snsl_matrix(spinor);
+    snsl_spinor.print_norms("snsl_spinor");
+    auto sl_spinor=sl_matrix(spinor);
+    sl_spinor.print_norms("sl_spinor");
+    auto snZ_spinor=snZ_matrix(spinor);
+    snZ_spinor.print_norms("snZ_spinor");
+
     if (0) {
-        Derivative<double_complex,3> dx(world,0);
-        Derivative<double_complex,3> dy(world,1);
-        Derivative<double_complex,3> dz(world,2);
-        auto dxspinor_abgv=Spinor(apply(world,dx,spinor.components));
-        dxspinor_abgv.plot("dxspinor_abgv");
-        dx.set_bspline1();
-        auto dxspinor_bspline=Spinor(apply(world,dx,spinor.components));
-        dxspinor_bspline.plot("dxspinor_bspline");
-        dx.set_ble1();
-        auto dxspinor_ble=Spinor(apply(world,dx,spinor.components));
-        dxspinor_ble.plot("dxspinor_ble");
+        auto Rinv = ansatz.Rinv(world);
+        Rinv.print("Rinv");
+        es.compute_F=false;
+        auto exact1=es.get_spinor(world);
+        auto Rinvexact1=double_complex(0.0,1.0)*Rinv(exact1);
+        ansatz.normalize(Rinvexact1);
+        Rinvexact1.print_norms("Rinvexact");
+        auto diff=Rinvexact1-spinor;
+        diff.print_norms("F-Rinv(psi)");
     }
 
+    Spinor bra = ansatz.make_bra(spinor);
     ansatz.normalize(bra, spinor);
     auto norms = norm2s(world, spinor.components);
+    print("component norms", norms);
 
     print("");
     auto Hdspinor = Hd(spinor);
     auto Hvspinor = Hv(spinor);
     auto Hspinor = H(spinor);
+    double gamma1=compute_gamma(ansatz.nuclear_charge);
+    ncf ncf1(gamma1,ansatz.a,ansatz.nuclear_charge);
+    real_function_3d r2_functor=real_factory_3d(world)
+            .functor([&ncf1,&gamma1](const coord_3d& r){
+                double R=ncf1(r);
+                return 2.0*R*R/(gamma1+1.0);
+            });
+    real_function_3d R2=real_factory_3d(world).functor(r2_functor);
+    auto R2Hspinor=R2*Hspinor;
     auto hnorms = norm2s(world, Hspinor.components);
-    print("component norms", norms);
+    auto energy_norms=norms;
+    for (auto& c : energy_norms) c*=es.get_energy();
+    print("E * component norms", energy_norms);
     print("H(spinor) component norms", hnorms);
     auto en = inner(bra, Hspinor);
 
     auto diff = Hspinor - en * spinor;
-    spinor.plot("spinor");
-    Hspinor.plot("Hspinor");
-    Hdspinor.plot("Hdspinor");
-    Hvspinor.plot("Hvspinor");
-    diff.plot("diff_Hspinor_en_spinor");
-    auto dnorms = norm2s(world, diff.components);
-    print("difference component norms", dnorms);
+    spinor.print_norms("spinor");
+    Hspinor.print_norms("Hspinor");
+    Hdspinor.print_norms("Hdspinor");
+    Hvspinor.print_norms("Hvspinor");
+    diff.print_norms("diff_Hspinor_en_spinor");
     double c=1.0/alpha1;
     print("energy", en, real(en - c * c), "difference", real(en - c * c) - (es.get_energy() - c * c));print("");
     print("");
@@ -1432,12 +1687,12 @@ int main(int argc, char* argv[]) {
     double energy_exact=gamma*c*c - c*c;
     print("1s energy for Z=",nuclear_charge,": ",energy_exact);
 
-//    eigenvector_test(world,Ansatz0(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
+//    eigenvector_test(world,Ansatz0(nuclear_charge,1),ExactSpinor(2,'P',1.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz1(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz2(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.3),ExactSpinor(1,'S',0.5,nuclear_charge));
-//    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.2),ExactSpinor(2,'P',1.5,nuclear_charge));
-    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.2),ExactSpinor(1,'S',0.5,nuclear_charge));
+    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.2),ExactSpinor(2,'P',1.5,nuclear_charge));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.2),ExactSpinor(1,'S',0.5,nuclear_charge));
 
 
 //    try {
