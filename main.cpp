@@ -13,7 +13,7 @@ static bool debug=false;
 static double alpha1=constants::fine_structure_constant;
 static double shift=0.0;
 static bool exact_has_singularity=false;
-static double epsilon=1.e-10;
+static double epsilon=1.e-8;
 
 struct stepfunction {
     int axis=-1;
@@ -214,9 +214,9 @@ public:
         auto D1 = free_space_derivative<T,NDIM>(world,1);
         auto D2 = free_space_derivative<T,NDIM>(world,2);
         auto Daxis = free_space_derivative<T,NDIM>(world,axis);
-//        D0.set_ble1();
-//        D1.set_ble1();
-//        D2.set_ble1();
+        D0.set_ble1();
+        D1.set_ble1();
+        D2.set_ble1();
         world.gop.fence();
         const long axis1=axis;
         real_function_3d n0=real_factory_3d(world).functor([](const coord_3d& r){return stepfunction(0)(r);});
@@ -268,8 +268,8 @@ public:
         int index2=(axis+2)%3;
         auto gradop1 = free_space_derivative<T,NDIM>(world,index1);
         auto gradop2 = free_space_derivative<T,NDIM>(world,index2);
-//        gradop1.set_ble1();
-//        gradop2.set_ble1();
+        gradop1.set_ble1();
+        gradop2.set_ble1();
         const double_complex ii={0.0,1.0};
         vecfuncT p1=-ii*apply(world, gradop1, vket);
         vecfuncT p2=-ii*apply(world, gradop2, vket);
@@ -432,6 +432,7 @@ public:
             }
         }
         double_complex norm2=inner(arg,arg);
+        result.truncate();
 
         if (std::abs(norm1-norm2)/std::abs(norm1)>1.e-10) throw;
 
@@ -1250,7 +1251,7 @@ public:
         return std::string("3")+v;
     }
     std::string filename() const {
-        return "v"+std::to_string(version) +"_a" +std::to_string(a);
+        return "3_v"+std::to_string(version) +"_a" +std::to_string(a);
     }
 
     Ansatz3(const double nuclear_charge, const int version, const double a, const bool longrange_correction=false) : nuclear_charge(nuclear_charge),
@@ -1269,7 +1270,7 @@ public:
         const double Z=double(nuclear_charge);
         const double alpha=constants::fine_structure_constant;
         const double gamma= compute_gamma(nuclear_charge);
-        const double C=nuclear_charge/n;
+        const double C=0.95*nuclear_charge/n;
 
 
         real_function_3d zero=real_factory_3d(world).functor([](const coord_3d& r){return 0.0;});
@@ -1293,7 +1294,7 @@ public:
         print("norm of real(guess)",nn);
         result.components[0]=convert<double,double_complex>(bla);
         result.components[1]=convert<double,double_complex>(zero);
-        result.components[2]=convert<double,double_complex>(zero);
+        result.components[2]=convert<double,double_complex>(0.01*bla);
         result.components[3]=convert<double,double_complex>(zero);
 
         double norm=norm2(world,result.components);
@@ -1446,7 +1447,7 @@ Spinor iterate(const Spinor& input, const double energy, const AnsatzT& ansatz, 
     allocator alloc(world);
     XNonlinearSolver<Spinor,double_complex,allocator> solver(alloc);
     solver.set_maxsub(5);
-    solver.do_print=true;
+    solver.do_print=false;
     auto Hv=ansatz.make_Hv(world);
     auto Hd=ansatz.make_Hd(world);
     auto H=Hd+Hv;
@@ -1460,21 +1461,21 @@ Spinor iterate(const Spinor& input, const double energy, const AnsatzT& ansatz, 
         double wall0=wall_time();
         print("\nIteration ",i);
         auto newpsi=apply_bsh(ansatz,Hd,Hv,metric,current,energy);
+//        timer t(world);
         auto residual=current-newpsi;
         newpsi=solver.update(current,residual,1.e-4,100).truncate();
-        auto res_bra=ansatz.make_bra(residual);
-        if (debug) show_norms(res_bra,residual,"residual");
+//        auto res_bra=ansatz.make_bra(residual);
+//        if (debug) show_norms(res_bra,residual,"residual");
+//        t.tag("solver");
         Spinor bra=ansatz.make_bra(newpsi);
+//        t.tag("make_bra");
         ansatz.normalize(bra,newpsi);
-        if (debug) show_norms(bra,newpsi,"newpsi after normalization");
-        std::string filename="spinor_0_re_ansatz"+ansatz.filename()+"_iter"+std::to_string(i);
-        plot_line(filename.c_str(),npt,lo,hi,real(newpsi.components[0]),real(newpsi.components[1]),real(newpsi.components[2]),real(newpsi.components[3]));
-        plot_plane(world,real(newpsi.components),filename);
-        filename="spinor_0_im_ansatz"+ansatz.filename()+"_iter"+std::to_string(i);
-        plot_line(filename.c_str(),npt,lo,hi,imag(newpsi.components[0]),imag(newpsi.components[1]),imag(newpsi.components[2]),imag(newpsi.components[3]));
-        plot_plane(world,imag(newpsi.components),filename);
+//        t.tag("normalize");
+        show_norms(bra,newpsi,"newpsi after normalization");
+        newpsi.plot("psi_iteration"+std::to_string(i)+"_ansatz"+ansatz.filename());
         double en=real(inner(bra,H(newpsi)));
-        if (debug) show_norms(bra,H(newpsi),"energy contributions");
+//        t.tag("compute energy, apply H");
+        show_norms(bra,H(newpsi),"energy contributions");
         print("computed energy             ", en);
         print("computed electronic energy  ", compute_electronic_energy(en) );
         print("exact electronic energy     ", compute_electronic_energy(energy));
@@ -1496,35 +1497,6 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const int k) {
     ansatz.normalize(guess);
     ansatz.normalize(guess);
     show_norms(bra,guess,"norms in the beginning");
-    if (debug) show_norms(guess,bra,"norms in the beginning, hc");
-//    guess+=guess;
-//    guess.show_norms(bra,"norms in the beginning");
-//    Metric N=N_metric();
-//    guess=N(guess);
-//    guess.show_norms(bra,"norms in the beginning");
-    auto dipole_x=moments(world,0,1);
-    auto dipole_y=moments(world,1,1);
-    auto dipole_z=moments(world,2,1);
-
-    auto quadrupole_x=moments(world,0,2);
-    auto quadrupole_y=moments(world,1,2);
-    auto quadrupole_z=moments(world,2,2);
-
-    if (debug) show_norms(bra,dipole_x(guess),"dipole_x");
-    if (debug) show_norms(bra,dipole_y(guess),"dipole_y");
-    if (debug) show_norms(bra,dipole_z(guess),"dipole_z");
-    if (debug) show_norms(bra,quadrupole_x(guess),"quadrupole_x");
-    if (debug) show_norms(bra,quadrupole_y(guess),"quadrupole_y");
-    if (debug) show_norms(bra,quadrupole_z(guess),"quadrupole_z");
-
-    coord_3d lo({0,0,-.3});
-    coord_3d hi({0,0, .3});
-    const int npt=3001;
-    std::string filename="spinor_0_re_ansatz"+ansatz.filename()+"_guess";
-    plot_line(filename.c_str(),npt,lo,hi,real(guess.components[0]));
-    plot_plane(world,real(guess.components),filename);
-    filename="spinor_0_im_ansatz"+ansatz.filename()+"_guess";
-    plot_plane(world,imag(guess.components),filename);
 
     const double alpha=constants::fine_structure_constant;
     const double c=1.0/alpha;
@@ -1541,10 +1513,6 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const int k) {
     show_norms(bra,guess,"norms of guess before Hamiltonians");
     Spinor Hpsi = H(guess);
 
-    if (debug) show_norms(bra,Hd(guess),"after <bra | Hd psi > ");
-    if (debug) show_norms(bra,Hv(guess),"after <bra | Hv psi > ");
-    if (debug) show_norms(bra,Hpsi,"after <bra | Hpsi > ");
-    if (debug) show_norms(bra,guess,"norms of guess after Hamiltonians");
     double en=real(inner(bra,H(guess)));
     show_norms(bra,H(guess),"energy contributions");
     print("computed energy             ", en);
@@ -1552,7 +1520,7 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const int k) {
     print("exact electronic energy     ", electronic_energy);
     print("energy difference           ", compute_electronic_energy(en) - electronic_energy);
     show_norms(bra,guess,"norms of guess before iterate");
-    auto result=iterate(guess,energy,ansatz,2);
+    auto result=iterate(guess,energy,ansatz,20);
 
 }
 
@@ -1565,7 +1533,7 @@ void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
     es.compute_F=true;
     es.print();
     auto exactF = es.get_spinor(world);
-//    ansatz.normalize(exactF);
+    ansatz.normalize(exactF);
     exactF.plot("exactF");
 
     auto Hv = ansatz.make_Hv(world);
@@ -1577,7 +1545,7 @@ void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
     Spinor spinor = copy(exactF);
 //    ansatz.normalize(spinor);
 
-    MatrixOperator snZ_matrix= make_Hv_reg3_snZ(world,ansatz.nuclear_charge,ansatz.a,false);
+
 
     MatrixOperator sl_matrix;
     auto sl= make_Zrsl(world,ansatz.nuclear_charge);
@@ -1593,8 +1561,10 @@ void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
     snsl_spinor.print_norms("snsl_spinor");
     auto sl_spinor=sl_matrix(spinor);
     sl_spinor.print_norms("sl_spinor");
-    auto snZ_spinor=snZ_matrix(spinor);
-    snZ_spinor.print_norms("snZ_spinor");
+
+//    MatrixOperator snZ_matrix= make_Hv_reg3_snZ(world,ansatz.nuclear_charge,ansatz.a,false);
+//    auto snZ_spinor=snZ_matrix(spinor);
+//    snZ_spinor.print_norms("snZ_spinor");
 
     if (0) {
         auto Rinv = ansatz.Rinv(world);
@@ -1617,15 +1587,6 @@ void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
     auto Hdspinor = Hd(spinor);
     auto Hvspinor = Hv(spinor);
     auto Hspinor = H(spinor);
-    double gamma1=compute_gamma(ansatz.nuclear_charge);
-    ncf ncf1(gamma1,ansatz.a,ansatz.nuclear_charge);
-    real_function_3d r2_functor=real_factory_3d(world)
-            .functor([&ncf1,&gamma1](const coord_3d& r){
-                double R=ncf1(r);
-                return 2.0*R*R/(gamma1+1.0);
-            });
-    real_function_3d R2=real_factory_3d(world).functor(r2_functor);
-    auto R2Hspinor=R2*Hspinor;
     auto hnorms = norm2s(world, Hspinor.components);
     auto energy_norms=norms;
     for (auto& c : energy_norms) c*=es.get_energy();
@@ -1691,13 +1652,13 @@ int main(int argc, char* argv[]) {
 //    eigenvector_test(world,Ansatz1(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz2(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.3),ExactSpinor(1,'S',0.5,nuclear_charge));
-    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.2),ExactSpinor(2,'P',1.5,nuclear_charge));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.2),ExactSpinor(2,'P',1.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.2),ExactSpinor(1,'S',0.5,nuclear_charge));
 
 
 //    try {
 //        run(world,Ansatz0(nuclear_charge,k),nuclear_charge,k);
-//        run(world,Ansatz1(nuclear_charge,k),nuclear_charge,k);
+        run(world,Ansatz1(nuclear_charge,k),nuclear_charge,k);
 ////        run(world,Ansatz2(nuclear_charge,k),nuclear_charge,k);
 //        debug=true;
 ////        ansatz3_version=1;
@@ -1706,8 +1667,8 @@ int main(int argc, char* argv[]) {
 ////        run(world,Ansatz3(nuclear_charge,1,-1.3),nuclear_charge,k);
 ////        run(world,Ansatz3(nuclear_charge,1,1.1),nuclear_charge,k);
 ////        run(world,Ansatz3(nuclear_charge,1,1.3),nuclear_charge,k);
-////        run(world,Ansatz3(nuclear_charge,1,1.5,false),nuclear_charge,k);
-//        run(world,Ansatz3(nuclear_charge,1,1.5,true),nuclear_charge,k);
+        run(world,Ansatz3(nuclear_charge,1,-1.5,true),nuclear_charge,k);
+        run(world,Ansatz3(nuclear_charge,1,1.5,false),nuclear_charge,k);
 //        run(world,Ansatz3(nuclear_charge,1,2.0,false),nuclear_charge,k);
 //        run(world,Ansatz3(nuclear_charge,2,1.5,false),nuclear_charge,k);
 ////        run(world,Ansatz3(nuclear_charge,3),nuclear_charge,k);
