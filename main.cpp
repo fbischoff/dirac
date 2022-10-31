@@ -13,7 +13,8 @@ static bool debug=false;
 static double alpha1=constants::fine_structure_constant;
 static double shift=0.0;
 static bool exact_has_singularity=false;
-static double epsilon=1.e-8;
+static double epsilon=1.e-10;
+static bool use_ble=false;
 
 struct stepfunction {
     int axis=-1;
@@ -214,9 +215,11 @@ public:
         auto D1 = free_space_derivative<T,NDIM>(world,1);
         auto D2 = free_space_derivative<T,NDIM>(world,2);
         auto Daxis = free_space_derivative<T,NDIM>(world,axis);
-        D0.set_ble1();
-        D1.set_ble1();
-        D2.set_ble1();
+        if (use_ble) {
+            D0.set_ble1();
+            D1.set_ble1();
+            D2.set_ble1();
+        }
         world.gop.fence();
         const long axis1=axis;
         real_function_3d n0=real_factory_3d(world).functor([](const coord_3d& r){return stepfunction(0)(r);});
@@ -268,8 +271,10 @@ public:
         int index2=(axis+2)%3;
         auto gradop1 = free_space_derivative<T,NDIM>(world,index1);
         auto gradop2 = free_space_derivative<T,NDIM>(world,index2);
-        gradop1.set_ble1();
-        gradop2.set_ble1();
+        if (use_ble) {
+            gradop1.set_ble1();
+            gradop2.set_ble1();
+        }
         const double_complex ii={0.0,1.0};
         vecfuncT p1=-ii*apply(world, gradop1, vket);
         vecfuncT p2=-ii*apply(world, gradop2, vket);
@@ -689,7 +694,7 @@ MatrixOperator make_Hv_reg2(World& world, const double nuclear_charge, const dou
 
 
 /// the off-diagonal blocks of ansatz 3
-MatrixOperator make_Hv_reg3_snZ(World& world, const double nuclear_charge, const double aa, const bool longrange_correction) {
+MatrixOperator make_Hv_reg3_snZ(World& world, const double nuclear_charge, const double aa) {
 
     print("a in make_Hv_reg3", aa);
 
@@ -744,9 +749,9 @@ MatrixOperator make_Hv_reg3_snZ(World& world, const double nuclear_charge, const
 }
 
 /// Hv for ansatz 3
-MatrixOperator make_Hv_reg3_version1(World& world, const double nuclear_charge, const double aa, const bool lr_correction) {
+MatrixOperator make_Hv_reg3_version1(World& world, const double nuclear_charge, const double aa) {
 
-    MatrixOperator Hz=make_Hv_reg3_snZ(world,nuclear_charge,aa,lr_correction);
+    MatrixOperator Hz=make_Hv_reg3_snZ(world,nuclear_charge,aa);
 
     MatrixOperator sl_matrix;
     auto sl= make_Zrsl(world,nuclear_charge);
@@ -780,8 +785,8 @@ MatrixOperator make_Hv_reg3_version1(World& world, const double nuclear_charge, 
 }
 
 /// Hv for ansatz 3
-MatrixOperator make_Hv_reg3_version3(World& world, const double nuclear_charge, const double aa, const bool lr_correction) {
-    MatrixOperator H=make_Hv_reg3_snZ(world,nuclear_charge,aa,lr_correction);
+MatrixOperator make_Hv_reg3_version3(World& world, const double nuclear_charge, const double aa) {
+    MatrixOperator H=make_Hv_reg3_snZ(world,nuclear_charge,aa);
 
     double gamma = compute_gamma(nuclear_charge);
 
@@ -1150,7 +1155,7 @@ struct Ansatz2 : public AnsatzBase {
 public:
     double nuclear_charge, k;
     double a=1.2;
-    Ansatz2(const double nuclear_charge, const int k) : nuclear_charge(nuclear_charge), k(k) {
+    Ansatz2(const double nuclear_charge, const int k, const double a) : nuclear_charge(nuclear_charge), k(k), a(a) {
         iansatz=2;
         MADNESS_ASSERT(k==1);
     }
@@ -1241,7 +1246,6 @@ public:
     double nuclear_charge;
     double a=1.3;
     int version=3;
-    bool longrange_correction=true;
 
     std::string name() const {
         std::string v;
@@ -1254,8 +1258,8 @@ public:
         return "3_v"+std::to_string(version) +"_a" +std::to_string(a);
     }
 
-    Ansatz3(const double nuclear_charge, const int version, const double a, const bool longrange_correction=false) : nuclear_charge(nuclear_charge),
-            version(version), a(a), longrange_correction(longrange_correction) {
+    Ansatz3(const double nuclear_charge, const int version, const double a) : nuclear_charge(nuclear_charge),
+            version(version), a(a) {
         iansatz=3;
         set_version(version,nuclear_charge);
     }
@@ -1304,9 +1308,9 @@ public:
 
 
     MatrixOperator make_Hv(World& world) const {
-        if (version==1)  return ::make_Hv_reg3_version1(world,nuclear_charge,a,longrange_correction);
-        if (version==2)  return ::make_Hv_reg3_snZ(world,nuclear_charge,a,longrange_correction);
-        if (version==3)  return ::make_Hv_reg3_version3(world,nuclear_charge,a,longrange_correction);
+        if (version==1)  return ::make_Hv_reg3_version1(world,nuclear_charge,a);
+        if (version==2)  return ::make_Hv_reg3_snZ(world,nuclear_charge,a);
+        if (version==3)  return ::make_Hv_reg3_version3(world,nuclear_charge,a);
         MADNESS_EXCEPTION("no version in ansatz 3 given",1);
     }
 
@@ -1621,6 +1625,8 @@ int main(int argc, char* argv[]) {
 
     // set defaults
     int nuclear_charge=92;
+    int ansatz=3;
+    double nemo_factor=1.5;
     FunctionDefaults<3>::set_cubic_cell(-20,20);
     FunctionDefaults<3>::set_k(12);
     FunctionDefaults<3>::set_thresh(1.e-10);
@@ -1629,6 +1635,9 @@ int main(int argc, char* argv[]) {
     if (parser.key_exists("thresh")) FunctionDefaults<3>::set_thresh(atof(parser.value("thresh").c_str()));
     if (parser.key_exists("L")) FunctionDefaults<3>::set_cubic_cell(atof(parser.value("L").c_str()),atof(parser.value("L").c_str()));
     if (parser.key_exists("transform_c")) transform_c=true;
+    if (parser.key_exists("ansatz")) ansatz=atoi(parser.value("ansatz").c_str());
+    if (parser.key_exists("nemo_factor")) nemo_factor=std::atof(parser.value("nemo_factor").c_str());
+    if (parser.key_exists("use_ble")) use_ble=true;
 
     print("\nCalculation parameters");
     print("thresh      ",FunctionDefaults<3>::get_thresh());
@@ -1636,6 +1645,7 @@ int main(int argc, char* argv[]) {
     print("charge      ",nuclear_charge);
     print("cell        ",FunctionDefaults<3>::get_cell_width());
     print("transform_c ",transform_c);
+    print("ues_ble     ",use_ble);
 
 
     const double alpha=constants::fine_structure_constant;
@@ -1656,25 +1666,14 @@ int main(int argc, char* argv[]) {
 //    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.2),ExactSpinor(1,'S',0.5,nuclear_charge));
 
 
-//    try {
-//        run(world,Ansatz0(nuclear_charge,k),nuclear_charge,k);
-        run(world,Ansatz1(nuclear_charge,k),nuclear_charge,k);
-////        run(world,Ansatz2(nuclear_charge,k),nuclear_charge,k);
-//        debug=true;
-////        ansatz3_version=1;
-////        transform_c=false;
-////        transform_c=false;
-////        run(world,Ansatz3(nuclear_charge,1,-1.3),nuclear_charge,k);
-////        run(world,Ansatz3(nuclear_charge,1,1.1),nuclear_charge,k);
-////        run(world,Ansatz3(nuclear_charge,1,1.3),nuclear_charge,k);
-        run(world,Ansatz3(nuclear_charge,1,-1.5,true),nuclear_charge,k);
-        run(world,Ansatz3(nuclear_charge,1,1.5,false),nuclear_charge,k);
-//        run(world,Ansatz3(nuclear_charge,1,2.0,false),nuclear_charge,k);
-//        run(world,Ansatz3(nuclear_charge,2,1.5,false),nuclear_charge,k);
-////        run(world,Ansatz3(nuclear_charge,3),nuclear_charge,k);
-//    } catch (...) {
-//        std::cout << "caught an error " << std::endl;
-//    }
+    try {
+        if (ansatz==0) run(world,Ansatz0(nuclear_charge,k),nuclear_charge,k);
+        if (ansatz==1) run(world,Ansatz1(nuclear_charge,k),nuclear_charge,k);
+        if (ansatz==2) run(world,Ansatz2(nuclear_charge,k,nemo_factor),nuclear_charge,k);
+        if (ansatz==3) run(world,Ansatz3(nuclear_charge,1,nemo_factor),nuclear_charge,k);
+    } catch (...) {
+        std::cout << "caught an error " << std::endl;
+    }
     finalize();
     return 0;
 
