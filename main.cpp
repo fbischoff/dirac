@@ -3,8 +3,10 @@
 // #define USE_GENTENSOR 0 // only needed if madness was configured with `-D ENABLE_GENTENSOR=1
 #include<madness.h>
 #include<madness/chem.h>
+#include<madness/misc/info.h>
 #include<madness/mra/nonlinsol.h>
 #include<madness/world/timing_utilities.h>
+
 using namespace madness;
 
 
@@ -15,6 +17,9 @@ static double shift=0.0;
 static bool exact_has_singularity=false;
 static double epsilon=1.e-10;
 static bool use_ble=false;
+static const double bohr_rad=52917.7211;
+static const double lo=1.e-10;
+
 
 struct stepfunction {
     int axis=-1;
@@ -62,6 +67,130 @@ struct ncf {
     }
 
 };
+
+
+//Functor to make the fermi nuclear charge distribution (NOT the potential, and NOT normalized) for a given center
+//This is based on Visscher and Dyall's 1997 paper on nuclear charge distributions.
+class FermiNucDistFunctor : public FunctionFunctorInterface<double,3> {
+private:
+    int m_A;
+    double m_T;
+    double m_C;
+    std::vector<coord_3d> m_R;
+public:
+    // Constructor
+    FermiNucDistFunctor(int& Z, coord_3d R, double bohr_rad){
+        //m_T = 0.000043463700858425666; //2.3 fm in bohr
+        m_T = 2.3/bohr_rad;
+        m_R.push_back(R);
+
+        //find atomic mass numbers for each atom. This list matches that of Visccher and Dyall (1997)
+        int Alist[116] = {1,4,7,9,11,12,14,16,19,20,23,24,27,28,31,32,35,40,39,40,45,48,51,52,55,56,59,58,63,64,69,74,75,80,79,84,85,88,89,90,93,98,98,102,103,106,107,114,115,120,121,130,127,132,133,138,139,140,141,144,145,152,153,158,159,162,162,168,169,174,175,180,181,184,187,192,193,195,197,202,205,208,209,209,210,222,223,226,227,232,231,238,237,244,243,247,247,251,252,257,258,259,262,261,262,263,262,265,266,264,272,277,284,289,288,292};
+        m_A = Alist[Z-1];
+
+        double PI = constants::pi;
+        if(m_A < 5){
+            m_C = 0.000022291*pow(m_A, 1.0/3.0) - 0.0000090676;
+        }
+        else{
+            m_C = sqrt(5.0/3.0*pow((0.836*pow(m_A,1.0/3.0)+0.570)/bohr_rad,2) - 7.0/3.0*pow(PI*m_T/4.0/log(3.0),2));
+        }
+    }
+
+    //overload () operator
+    double operator() (const coord_3d&r) const {
+        double x = r[0] - m_R[0][0];
+        double y = r[1] - m_R[0][1];
+        double z = r[2] - m_R[0][2];
+        double rr = sqrt(x*x+y*y+z*z);
+        double result = 1.0/(1.0+exp(4.0*log(3.0)*(rr-m_C)/m_T));
+        return result;
+    }
+
+    //Because the distribution is only nonzero in a small window around the center, need to create a special point
+    std::vector<coord_3d> special_points() const {
+        return m_R;
+    }
+
+    madness::Level special_level() {
+        return 18;
+    }
+
+    //Print the parameters of the Fermi nuclear charge distribution
+    void print_details(World& world){
+
+        //Constants necessary to print the details. Technically need to use bohr_rad parameter here
+        int Alist[116] = {1,4,7,9,11,12,14,16,19,20,23,24,27,28,31,32,35,40,39,40,45,48,51,52,55,56,59,58,63,64,69,74,75,80,79,84,85,88,89,90,93,98,98,102,103,106,107,114,115,120,121,130,127,132,133,138,139,140,141,144,145,152,153,158,159,162,162,168,169,174,175,180,181,184,187,192,193,195,197,202,205,208,209,209,210,222,223,226,227,232,231,238,237,244,243,247,247,251,252,257,258,259,262,261,262,263,262,265,266,264,272,277,284,289,288,292};
+        double T = 2.3/52917.72490083583;
+        double PI = constants::pi;
+
+        if(world.rank()==0){
+            for(int i = 0; i < 116; i++){
+                double RMS = (0.836*pow(Alist[i],1.0/3.0)+0.570)/52917.72490083583;
+                double C;
+                if(Alist[i] < 5){
+                    C = 0.000022291*pow(Alist[i], 1.0/3.0) - 0.0000090676;
+                }
+                else{
+                    C = sqrt(5.0/3.0*pow(RMS,2)-7.0/3.0*pow(PI*T/4.0/log(3.0),2));
+                }
+                double xi = 3.0/2.0/pow(RMS,2);
+                printf("Z: %3i,  A: %3i,  RMS: %.10e,  C: %.10e,  xi: %.10e\n", i+1, Alist[i], RMS, C, xi);
+            }
+        }
+    }
+};
+
+
+//Creates the fermi nuclear potential from the charge distribution. Also calculates the nuclear repulsion energy
+real_function_3d make_fermi_potential(World& world, double& nuclear_repulsion_energy, const double nuclear_charge){
+    real_convolution_3d op=CoulombOperator(world,lo,FunctionDefaults<3>::get_thresh());
+    if(world.rank()==0) print("\n***Making a Fermi Potential***");
+
+    //Get list of atom coordinates
+//    std::vector<coord_3d> Rlist = Init_params.molecule.get_all_coords_vec();
+    std::vector<coord_3d> Rlist = {{0.0,0.0,0.0}};
+    std::vector<int> Zlist(Rlist.size());
+    unsigned int num_atoms = Rlist.size();
+
+    //variables for upcoming loop
+    real_function_3d temp, potential;
+    double tempnorm;
+
+    //Go through the atoms in the molecule and construct the total charge distribution due to all nuclei
+    for(unsigned int i = 0; i < num_atoms; i++){
+//        Zlist[i] = Init_params.molecule.get_atomic_number(i);
+        Zlist[i] = nuclear_charge;
+        FermiNucDistFunctor rho(Zlist[i], Rlist[i],bohr_rad);
+        temp = real_factory_3d(world).functor(rho).truncate_mode(0);
+        tempnorm = temp.trace();
+        temp.scale(-Zlist[i]/tempnorm);
+        if(i == 0){
+            potential = temp;
+            //rho.print_details(world);
+        }
+        else{
+            potential += temp;
+        }
+    }
+
+    //Potential is found by application of the coulomb operator to the charge distribution
+    potential = apply(op,potential);
+
+    //Calculate the nuclear repulsion energy
+    //It doesn't change iteration to iteration, so we want to calculate it once and store the result
+    //We calculate it inside this function because here we already have access to the nuclear charges and coordinates
+    nuclear_repulsion_energy = 0.0;
+    double rr;
+    for(unsigned int m = 0; m < num_atoms; m++){
+        for(unsigned int n = m+1; n < num_atoms; n++){
+            coord_3d dist = Rlist[m] - Rlist[n];
+            rr = std::sqrt(dist[0]*dist[0]+dist[1]*dist[1]+dist[2]*dist[2]);
+            nuclear_repulsion_energy += Zlist[m]*Zlist[n]/rr;
+        }
+    }
+    return potential;
+}
 
 /// returns the complex value of a given spherical harmonic
 struct SphericalHarmonics{
@@ -1415,7 +1544,7 @@ Spinor apply_bsh(ansatzT& ansatz, const MatrixOperator& Hd, const MatrixOperator
     if (debug) show_norms(ansatz.make_bra(vpsi),vpsi,"<vpsi | vpsi>");
     t.tag("Vpsi");
 
-    auto g=BSHOperator<3>(world,mu,1.e-8,FunctionDefaults<3>::get_thresh());
+    auto g=BSHOperator<3>(world,mu,lo,FunctionDefaults<3>::get_thresh());
 
     auto gvpsi1=apply(world,g,vpsi.components);
     t.tag("GVpsi");
@@ -1616,6 +1745,8 @@ int main(int argc, char* argv[]) {
         print_centered("Dirac hydrogen atom");
     }
     startup(world,argc,argv,true);
+    if (world.rank()==0) print(madness::info::print_revision_information());
+
 
     commandlineparser parser(argc,argv);
     if (world.rank()==0) {
@@ -1630,6 +1761,7 @@ int main(int argc, char* argv[]) {
     FunctionDefaults<3>::set_cubic_cell(-20,20);
     FunctionDefaults<3>::set_k(12);
     FunctionDefaults<3>::set_thresh(1.e-10);
+    int tmode=0;
     if (parser.key_exists("charge")) nuclear_charge=atoi(parser.value("charge").c_str());
     if (parser.key_exists("k")) FunctionDefaults<3>::set_k(atoi(parser.value("k").c_str()));
     if (parser.key_exists("thresh")) FunctionDefaults<3>::set_thresh(atof(parser.value("thresh").c_str()));
@@ -1638,10 +1770,13 @@ int main(int argc, char* argv[]) {
     if (parser.key_exists("ansatz")) ansatz=atoi(parser.value("ansatz").c_str());
     if (parser.key_exists("nemo_factor")) nemo_factor=std::atof(parser.value("nemo_factor").c_str());
     if (parser.key_exists("use_ble")) use_ble=true;
+    if (parser.key_exists("truncate_mode")) tmode=atoi(parser.value("truncate_mode").c_str());
+    FunctionDefaults<3>::set_truncate_mode(tmode);
 
     print("\nCalculation parameters");
     print("thresh      ",FunctionDefaults<3>::get_thresh());
     print("k           ",FunctionDefaults<3>::get_k());
+    print("trunc mode  ",FunctionDefaults<3>::get_truncate_mode());
     print("charge      ",nuclear_charge);
     print("cell        ",FunctionDefaults<3>::get_cell_width());
     print("transform_c ",transform_c);
