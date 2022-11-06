@@ -453,6 +453,11 @@ public:
         return *this;
     }
 
+    Spinor& operator-=(const Spinor& other) {
+        components-=other.components;
+        return *this;
+    }
+
     Spinor operator+(const Spinor& other) const {
         Spinor result;
         result.components=copy(world(),components); // deep copy
@@ -466,7 +471,6 @@ public:
         result.components-=other.components;
         return result;
     }
-
 
     Spinor& truncate() {
         madness::truncate(components);
@@ -512,9 +516,52 @@ Spinor operator*(const Spinor& arg, const T fac) {
     return Spinor(fac*arg.components);
 }
 
+
 Spinor copy(const Spinor& other) {
     return Spinor(copy(other.world(),other.components));
 }
+
+std::vector<Spinor> copy(const std::vector<Spinor>& other) {
+    std::vector<Spinor> result;
+    for (auto& oo : other) result.push_back(copy(oo.world(),oo.components));
+    return result;
+}
+
+
+template<typename T>
+std::vector<Spinor> operator*(const std::vector<Spinor>& arg, const T fac) {
+    std::vector<Spinor> result=copy(arg);
+    for (auto& r : result) r=r*fac;
+    return result;
+}
+double_complex inner(const std::vector<Spinor>& bra, const std::vector<Spinor> ket) {
+    double_complex result=0.0;
+    for (int i=0; i<bra.size(); ++i) result+=inner(bra[i],ket[i]);
+    return result;
+}
+
+std::vector<Spinor> operator-=(std::vector<Spinor>& left, const std::vector<Spinor>& right) {
+    for (int i=0; i<right.size(); ++i) left[i]-=right[i];
+    return left;
+}
+
+std::vector<Spinor> operator+=(std::vector<Spinor>& left, const std::vector<Spinor>& right) {
+    for (int i=0; i<right.size(); ++i) left[i]+=right[i];
+    return left;
+}
+
+std::vector<Spinor> operator-(const std::vector<Spinor>& left, const std::vector<Spinor>& right) {
+    std::vector<Spinor> result=copy(left);
+    result-=right;
+    return result;
+}
+
+
+std::vector<Spinor> truncate(std::vector<Spinor> arg) {
+    for (auto& a : arg) a.truncate();
+    return arg;
+}
+
 
 
 // The default constructor for functions does not initialize
@@ -522,16 +569,18 @@ Spinor copy(const Spinor& other) {
 // to zero for which we also need the world object.
 struct allocator {
     World& world;
-//    const int n;
-//
+    const int n;
+
     /// @param[in]	world	the world
     /// @param[in]	nn		the number of functions in a given vector
-    allocator(World& world) : world(world) {
+    allocator(World& world, const int n) : world(world), n(n) {
     }
 
     /// allocate a vector of n empty functions
-   Spinor operator()() {
-        return Spinor(world);
+   std::vector<Spinor> operator()() {
+        std::vector<Spinor> r(n);
+        for (auto & rr : r) rr=Spinor(world);
+        return r;
     }
 };
 
@@ -1566,70 +1615,73 @@ Spinor apply_bsh(ansatzT& ansatz, const MatrixOperator& Hd, const MatrixOperator
 }
 
 template<typename AnsatzT>
-Spinor iterate(const Spinor& input, const double energy, const AnsatzT& ansatz, const int maxiter) {
-    World& world=input.world();
-    const double alpha=constants::fine_structure_constant;
-    const double c=1.0/alpha;
-    const double nuclear_charge=ansatz.nuclear_charge;
-    const double gamma= compute_gamma(nuclear_charge);
+std::vector<Spinor> iterate(const std::vector<Spinor>& input, const std::vector<double> energy, const AnsatzT& ansatz, const int maxiter) {
 
-    coord_3d lo({0,0,-3});
-    coord_3d hi({0,0, 3});
-    const int npt=3001;
-
-    allocator alloc(world);
-    XNonlinearSolver<Spinor,double_complex,allocator> solver(alloc);
+    World& world=input.front().world();
+    allocator alloc(world,input.size());
+    XNonlinearSolver<std::vector<Spinor>,double_complex,allocator> solver(alloc);
     solver.set_maxsub(5);
     solver.do_print=false;
+
     auto Hv=ansatz.make_Hv(world);
     auto Hd=ansatz.make_Hd(world);
     auto H=Hd+Hv;
     auto metric= transform_c ? N_metric() : Metric();
     metric.print();
     auto current=copy(input);
-    ansatz.normalize(current);
-    auto bra1=ansatz.make_bra(current);
-    if (debug) show_norms(bra1,current,"current in iterate 1");
-    for (int i=0; i<maxiter; ++i) {
+    for (auto& c : current) ansatz.normalize(c);
+    for (int iter=0; iter<maxiter; ++iter) {
         double wall0=wall_time();
-        print("\nIteration ",i);
-        auto newpsi=apply_bsh(ansatz,Hd,Hv,metric,current,energy);
-//        timer t(world);
+        print("\nIteration ",iter);
+        std::vector<Spinor> newpsi, bra;
+        for (int i=0; i<current.size(); ++i) newpsi.push_back(apply_bsh(ansatz,Hd,Hv,metric,current[i],energy[i]));
         auto residual=current-newpsi;
-        newpsi=solver.update(current,residual,1.e-4,100).truncate();
-//        auto res_bra=ansatz.make_bra(residual);
-//        if (debug) show_norms(res_bra,residual,"residual");
-//        t.tag("solver");
-        Spinor bra=ansatz.make_bra(newpsi);
-//        t.tag("make_bra");
-        ansatz.normalize(bra,newpsi);
-//        t.tag("normalize");
-        show_norms(bra,newpsi,"newpsi after normalization");
-        newpsi.plot("psi_iteration"+std::to_string(i)+"_ansatz"+ansatz.filename());
-        double en=real(inner(bra,H(newpsi)));
-//        t.tag("compute energy, apply H");
-        show_norms(bra,H(newpsi),"energy contributions");
-        print("computed energy             ", en);
-        print("computed electronic energy  ", compute_electronic_energy(en) );
-        print("exact electronic energy     ", compute_electronic_energy(energy));
-        print("energy difference           ", compute_electronic_energy(en) - compute_electronic_energy(energy));
+        double res=0.0;
+        for (const auto& r : residual) res+=norm2(world,r.components);
+        newpsi=truncate(solver.update(current,residual,1.e-4,100));
+        for (auto& n : newpsi) {
+            bra.push_back(ansatz.make_bra(n));
+            ansatz.normalize(bra.back(),n);
+            show_norms(bra.back(),n,"newpsi after normalization");
+        }
+//        newpsi.plot("psi_iteration"+std::to_string(i)+"_ansatz"+ansatz.filename());
+        std::vector<double> energy_differences;
+        for (int i=0; i<current.size(); ++i) {
+            double en=real(inner(bra[i],H(newpsi[i])));
+//            show_norms(bra,H(newpsi),"energy contributions");
+            double el_energy=compute_electronic_energy(en);
+            double exact_el_energy=compute_electronic_energy(energy[i]);
+            double diff=(el_energy-exact_el_energy);
+            energy_differences.push_back(diff);
+            printf("energy, el. energy, exact el. energy, difference %12.8f %12.8f %12.8f %4.1e\n", en, el_energy,exact_el_energy,diff);
+        }
         current=newpsi;
         double wall1=wall_time();
-        printf("elapsed time in iteration %2d: %6.2f with energy/diff %12.8f %.2e \n",i,wall1-wall0,compute_electronic_energy(en),
-               compute_electronic_energy(en) - compute_electronic_energy(energy));
+        printf("elapsed time in iteration %2d: %6.2f with error %4.1e \n",iter,wall1-wall0,res );
+//        printf("elapsed time in iteration %2d: %6.2f with energy/diff %12.8f %.2e \n",iter,wall1-wall0,compute_electronic_energy(en),
+//               compute_electronic_energy(en) - compute_electronic_energy(energy));
     }
     return current;
 }
 
 template<typename ansatzT>
-void run(World& world, ansatzT ansatz, const int nuclear_charge, const int k) {
+void run(World& world, ansatzT ansatz, const int nuclear_charge, const int nstates) {
     print(" running Ansatz ",ansatz.name(), " transform_c",transform_c, "shift",shift);
-    Spinor guess = ansatz.make_guess(world);
-    ansatz.normalize(guess);
-    Spinor bra=ansatz.make_bra(guess);
-    ansatz.normalize(guess);
-    ansatz.normalize(guess);
-    show_norms(bra,guess,"norms in the beginning");
+//    Spinor guess = ansatz.make_guess(world);
+
+    auto psi1s=ExactSpinor(1,'S',0.5,nuclear_charge);
+    auto psi2p=ExactSpinor(2,'P',1.5,nuclear_charge);
+//    auto states ={psi1s,psi2p};
+    auto states ={psi1s};
+
+    std::vector<Spinor> guesses;
+    std::vector<double> energies;
+    for (auto& state : states) {
+        guesses.push_back(state.get_spinor(world));
+        energies.push_back(state.get_energy());
+        ansatz.normalize(guesses.back());
+    }
+
 
     const double alpha=constants::fine_structure_constant;
     const double c=1.0/alpha;
@@ -1643,17 +1695,20 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const int k) {
     Hv.print("Hamiltonian Hv");
     Hd.print("Hamiltonian Hd");
     H.print("Hamiltonian Hd+Hv");
-    show_norms(bra,guess,"norms of guess before Hamiltonians");
-    Spinor Hpsi = H(guess);
 
-    double en=real(inner(bra,H(guess)));
-    show_norms(bra,H(guess),"energy contributions");
-    print("computed energy             ", en);
-    print("computed electronic energy  ", compute_electronic_energy(en) );
-    print("exact electronic energy     ", electronic_energy);
-    print("energy difference           ", compute_electronic_energy(en) - electronic_energy);
-    show_norms(bra,guess,"norms of guess before iterate");
-    auto result=iterate(guess,energy,ansatz,20);
+    for (int i=0; i<1; i++) {
+        auto guess=guesses[i];
+        Spinor Hpsi = H(guess);
+        auto bra=ansatz.make_bra(guess);
+        double en=real(inner(bra,H(guess)));
+        show_norms(bra,H(guess),"energy contributions");
+        print("computed energy             ", en);
+        print("computed electronic energy  ", compute_electronic_energy(en) );
+        print("exact electronic energy     ", electronic_energy);
+        print("energy difference           ", compute_electronic_energy(en) - electronic_energy);
+        show_norms(bra,guess,"norms of guess before iterate");
+    }
+    auto result=iterate(guesses,energies,ansatz,20);
 
 }
 
