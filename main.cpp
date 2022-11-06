@@ -20,6 +20,9 @@ static bool use_ble=false;
 static const double bohr_rad=52917.7211;
 static const double lo=1.e-10;
 
+double compute_gamma(const double nuclear_charge) {
+    return sqrt(1-nuclear_charge*nuclear_charge*alpha1*alpha1);
+}
 
 struct stepfunction {
     int axis=-1;
@@ -68,6 +71,40 @@ struct ncf {
 
 };
 
+// direct projection fails for Z>40: compute Z/2 and square afterwords, or do it twice..
+struct radial_exponential {
+    World& world;
+    double a, Z;
+    long n=1;
+    radial_exponential(World& world, double a, double Z) : world(world),a(a), Z(Z) {}
+
+    real_function_3d compute() const {
+        coord_3d sp{0.0,0.0,0.0};
+        std::vector<coord_3d> special_points(1,sp);
+
+        const double alpha=constants::fine_structure_constant;
+        const double gamma= compute_gamma(Z);
+        const double C=0.95*Z/n;
+        double Chalf=C;
+        double N=std::pow(C,1.5)/sqrt(constants::pi);
+        int counter=0;
+        while (Chalf>40) {
+            Chalf*=0.5;
+            N=sqrt(N);
+            counter++;
+        }
+        print("counter",counter);
+        real_function_3d bla=real_factory_3d(world)
+                .functor([&Chalf,&N](const coord_3d& r){
+                    return N*exp(-Chalf*r.normf());
+                })
+                .special_level(30).special_points(special_points);
+
+        for (int i=0; i<counter; ++i) bla=bla.square();
+        return bla;
+    }
+
+};
 
 //Functor to make the fermi nuclear charge distribution (NOT the potential, and NOT normalized) for a given center
 //This is based on Visscher and Dyall's 1997 paper on nuclear charge distributions.
@@ -256,9 +293,6 @@ struct Omega {
 };
 
 
-double compute_gamma(const double nuclear_charge) {
-    return sqrt(1-nuclear_charge*nuclear_charge*alpha1*alpha1);
-}
 void set_version(const int v, const double nuclear_charge) {
     if (v==1) {
         transform_c=false;
@@ -1040,6 +1074,7 @@ struct ExactSpinor {
     long n, k, l;
     mutable int component=0;
     double E, C, gamma, Z, j, m;
+    double cusp_a=-1.0;
     bool compute_F=false;
     ExactSpinor(const int n, const char lc, const double j, const int Z)
         : ExactSpinor(n, l_char_to_int(lc),j,Z) { }
@@ -1090,8 +1125,11 @@ struct ExactSpinor {
         double r=c.normf();
         double rho=2*C*r;
         double gamma1= compute_gamma(Z);
-        double radial=exp(-rho*0.5);
+        ncf_cusp cusp(cusp_a, Z);
+//        double radial=exp(-rho*0.5)/cusp(r);
+        double radial=1.0/cusp(r);
         if (k*k>1) radial*=std::pow(rho,gamma-gamma1);
+
 
         double_complex i={0.0,1.0};
         double large=(gamma1 + 1)*((gamma + n) - (gamma1 -1));
@@ -1113,7 +1151,8 @@ struct ExactSpinor {
     double_complex psivalue(const coord_3d& c) const {
         double r=c.normf();
         double rho=2*C*r;
-        double radial=exp(-rho*0.5);
+//        double radial=exp(-rho*0.5);
+        double radial=1.0;
         radial*=std::pow(2*C,gamma);
         bool state_has_singularity= (k*k==1);
 
@@ -1164,6 +1203,9 @@ struct ExactSpinor {
         spinor.components[2]=complex_factory_3d(world).functor(*this);
         component=3;
         spinor.components[3]=complex_factory_3d(world).functor(*this);
+        radial_exponential radial1(world,cusp_a,Z);
+        real_function_3d radial=radial1.compute();
+        spinor.components=spinor.components*radial;
         return spinor;
     }
 
@@ -1198,6 +1240,7 @@ struct AnsatzBase {
     }
     [[nodiscard]] virtual Spinor make_bra(const Spinor& ket) const = 0;
     [[nodiscard]] virtual double mu(const double energy) const = 0;
+    [[nodiscard]] virtual double get_cusp_a() const {return -1.5;}
 };
 
 struct Ansatz0 : public AnsatzBase {
@@ -1340,6 +1383,7 @@ public:
     std::string name() const {
         return "2";
     }
+    double get_cusp_a() const {return a;}
     Spinor make_guess(World& world) const {
         Spinor result;
         const double_complex ii(0.0,1.0);
@@ -1425,6 +1469,7 @@ public:
     double a=1.3;
     int version=3;
 
+    double get_cusp_a() const {return a;}
     std::string name() const {
         std::string v;
         if (version==1) v=", version 1, no transform, no shift, a="+std::to_string(a);
@@ -1628,8 +1673,8 @@ std::vector<Spinor> iterate(const std::vector<Spinor>& input, const std::vector<
     auto H=Hd+Hv;
     auto metric= transform_c ? N_metric() : Metric();
     metric.print();
-    auto current=copy(input);
-    for (auto& c : current) ansatz.normalize(c);
+    std::vector<Spinor> current=copy(input);
+    for (Spinor& c : current) ansatz.normalize(c);
     for (int iter=0; iter<maxiter; ++iter) {
         double wall0=wall_time();
         print("\nIteration ",iter);
@@ -1644,9 +1689,9 @@ std::vector<Spinor> iterate(const std::vector<Spinor>& input, const std::vector<
             ansatz.normalize(bra.back(),n);
             show_norms(bra.back(),n,"newpsi after normalization");
         }
-//        newpsi.plot("psi_iteration"+std::to_string(i)+"_ansatz"+ansatz.filename());
         std::vector<double> energy_differences;
         for (int i=0; i<current.size(); ++i) {
+            newpsi[i].plot("psi"+std::to_string(i)+"_iteration"+std::to_string(iter)+"_ansatz"+ansatz.filename());
             double en=real(inner(bra[i],H(newpsi[i])));
 //            show_norms(bra,H(newpsi),"energy contributions");
             double el_energy=compute_electronic_energy(en);
@@ -1669,15 +1714,20 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const int nstat
     print(" running Ansatz ",ansatz.name(), " transform_c",transform_c, "shift",shift);
 //    Spinor guess = ansatz.make_guess(world);
 
-    auto psi1s=ExactSpinor(1,'S',0.5,nuclear_charge);
-    auto psi2p=ExactSpinor(2,'P',1.5,nuclear_charge);
-//    auto states ={psi1s,psi2p};
-    auto states ={psi1s};
-
     std::vector<Spinor> guesses;
     std::vector<double> energies;
-    for (auto& state : states) {
-        guesses.push_back(state.get_spinor(world));
+
+//    guesses.push_back(guess);
+//    energies.push_back(ansatz.energy());
+    ExactSpinor psi1s=ExactSpinor(1,'S',0.5,nuclear_charge);
+    ExactSpinor psi2p=ExactSpinor(2,'P',1.5,nuclear_charge);
+    std::vector<ExactSpinor> states ={psi1s,psi2p};
+
+    for (ExactSpinor& state : states) {
+        state.compute_F=true;
+        state.cusp_a=ansatz.get_cusp_a();
+        Spinor guess=state.get_spinor(world);
+        guesses.push_back(guess);
         energies.push_back(state.get_energy());
         ansatz.normalize(guesses.back());
     }
