@@ -7,4 +7,4 @@ find_package(MADNESS CONFIG REQUIRED)
 
 add_executable(dirac_hatom main.cpp)
 target_include_directories(dirac_hatom PUBLIC /opt/local/include)
-target_link_libraries(dirac_hatom madness)
+target_link_libraries(dirac_hatom madness xc)

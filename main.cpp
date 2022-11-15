@@ -1243,7 +1243,7 @@ struct ExactSpinor {
     // the energy dependent term for the spinor
     double compute_en() const {
         const double c=1.0/alpha1;
-        return gamma * c*c - k*get_energy() / (c*C);
+        return (gamma * c*c - k*get_energy()) / (c*C);
     }
 
     double get_energy() const {
