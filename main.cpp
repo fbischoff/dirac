@@ -11,15 +11,16 @@
 using namespace madness;
 
 
+enum Uplo {upper, lower};
 static bool transform_c=false;
 static bool debug=false;
 static double alpha1=constants::fine_structure_constant;
 static double shift=0.0;
 static bool exact_has_singularity=false;
-static double epsilon=1.e-10;
+static double epsilon=1.e-7;
 static bool use_ble=false;
 static const double bohr_rad=52917.7211;
-static const double lo=1.e-10;
+static const double lo=1.e-7;
 
 double compute_gamma(const double nuclear_charge) {
     return sqrt(1-nuclear_charge*nuclear_charge*alpha1*alpha1);
@@ -49,7 +50,9 @@ struct Sigma_ncf_cusp {
     Sigma_ncf_cusp(double a, double Z) :a(a),Z(Z) {}
     double operator()(const double& r) const {
         if (a<0.0) return 0.0;
-        return - a * Z/ (a - 1.0) * exp(-a * Z * r) / (1.0 + 1.0 / (a - 1.0) * exp(-a * Z * r));
+        const double denominator=1.0 + 1.0 / (a - 1.0) * exp(-a * Z * r);
+        const double numerator=-a*Z/(a-1.0) * exp(-a * Z * r);
+        return numerator/denominator;
     }
 };
 
@@ -800,33 +803,49 @@ MatrixOperator make_Hv(World& world, const double nuclear_charge) {
     return make_Hdiag(world,V1);
 }
 
-/// returns a (4,4) hermition matrix with H=\vec \alpha \vec {xyz}
-MatrixOperator make_alpha_sn(World& world, const LocalPotentialOperator<double_complex, 3>& x,
+MatrixOperator make_sigma_sn(World& world, const Uplo& uplo,
+                             const LocalPotentialOperator<double_complex, 3>& x,
                              const LocalPotentialOperator<double_complex, 3>& y,
                              const LocalPotentialOperator<double_complex, 3>& z,
-                             const bool ll_negative) {
+                             const double factor) {
+
     MatrixOperator H(4,4);
     const double_complex ii=double_complex(0.0,1.0);
     const double_complex one=double_complex(1.0,0.0);
 
-    // symmetric is the opposite of hermitian
+    if (uplo==upper) {
+        H.add_operator(0, 2, one * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
+        H.add_operator(0, 3, one * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
+        H.add_operator(0, 3, -ii * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
+
+        H.add_operator(1, 2, one * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
+        H.add_operator(1, 2,  ii * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
+        H.add_operator(1, 3,-one * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
+
+    } else if (uplo==lower) {
+        H.add_operator(2, 0, one * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
+        H.add_operator(2, 1, one * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
+        H.add_operator(2, 1, -ii * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
+
+        H.add_operator(3, 0, one * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
+        H.add_operator(3, 0,  ii * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
+        H.add_operator(3, 1,-one * factor, std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
+    }
+    return H;
+}
+
+/// returns a (4,4) hermition matrix with H=\vec \alpha \vec {xyz}
+MatrixOperator make_alpha_sn(World& world,
+                             const LocalPotentialOperator<double_complex, 3>& x,
+                             const LocalPotentialOperator<double_complex, 3>& y,
+                             const LocalPotentialOperator<double_complex, 3>& z,
+                             const bool ll_negative) {
     double fac=ll_negative ? -1.0 : 1.0;
 
-    H.add_operator(0, 2, one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
-    H.add_operator(0, 3, one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
-    H.add_operator(0, 3, -ii,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
+    MatrixOperator H(4,4);
+    H+=make_sigma_sn(world,upper,x,y,z,1.0);
+    H+=make_sigma_sn(world,lower,x,y,z,fac);
 
-    H.add_operator(1, 2, one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
-    H.add_operator(1, 2,  ii,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
-    H.add_operator(1, 3,-one,      std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
-
-    H.add_operator(2, 0, one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
-    H.add_operator(2, 1, one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
-    H.add_operator(2, 1, -ii *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
-
-    H.add_operator(3, 0, one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(x));
-    H.add_operator(3, 0,  ii *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(y));
-    H.add_operator(3, 1,-one *fac, std::make_shared<LocalPotentialOperator<double_complex, 3>>(z));
     return H;
 }
 
@@ -963,14 +982,16 @@ MatrixOperator make_Hv_reg3_snZ(World& world, const double nuclear_charge, const
     Sigma_ncf_cusp ncf_cusp_pot(a,Z);
 
     int axis=-1;
-    auto func =[&Zpot, &ncf_cusp_pot, &axis](const coord_3d& xyz) {
+    double factor=1.0;
+    auto func =[&Zpot, &ncf_cusp_pot, &axis,&factor](const coord_3d& xyz) {
         double r = xyz.normf();
         const double_complex ii={0.0,1.0};
         const double c=1.0/alpha1;
         const double step=stepfunction(axis)(xyz);
-        return ii*c * step* (Zpot(r)  + ncf_cusp_pot(r));
+        return ii*c * step* (Zpot(r)  +factor* ncf_cusp_pot(r));
     };
 
+    factor=1.0;
     axis=0;
     complex_function_3d x_div_r = complex_factory_3d(world).functor(func).special_level(15).special_points(special_points);
     axis=1;
@@ -978,20 +999,29 @@ MatrixOperator make_Hv_reg3_snZ(World& world, const double nuclear_charge, const
     axis=2;
     complex_function_3d z_div_r = complex_factory_3d(world).functor(func).special_level(15).special_points(special_points);
 
+    factor=-1.0;
+    axis=0;
+    complex_function_3d mx_div_r = complex_factory_3d(world).functor(func).special_level(15).special_points(special_points);
+    axis=1;
+    complex_function_3d my_div_r = complex_factory_3d(world).functor(func).special_level(15).special_points(special_points);
+    axis=2;
+    complex_function_3d mz_div_r = complex_factory_3d(world).functor(func).special_level(15).special_points(special_points);
+
 
     std::string extraname = (a > 0.0) ? " slater" : "";
     auto x_div_rexp = LocalPotentialOperator<double_complex, 3>(world, "x/r" + extraname, x_div_r);
     auto y_div_rexp = LocalPotentialOperator<double_complex, 3>(world, "y/r" + extraname, y_div_r);
     auto z_div_rexp = LocalPotentialOperator<double_complex, 3>(world, "z/r" + extraname, z_div_r);
 
-//    std::string filename = "sn_slater";
-//    coord_3d lo({0, 0, -3});
-//    coord_3d hi({0, 0, 3});
-//    const int npt = 3001;
-//    plot_line(filename.c_str(), npt, lo, hi, real(x_div_r), real(y_div_r), real(z_div_r));
-//    plot_plane(world, real(x_div_r), real(y_div_r), real(z_div_r), filename);
+    auto mx_div_rexp = LocalPotentialOperator<double_complex, 3>(world, "x/r" + extraname, mx_div_r);
+    auto my_div_rexp = LocalPotentialOperator<double_complex, 3>(world, "y/r" + extraname, my_div_r);
+    auto mz_div_rexp = LocalPotentialOperator<double_complex, 3>(world, "z/r" + extraname, mz_div_r);
 
-    return make_alpha_sn(world,x_div_rexp, y_div_rexp, z_div_rexp,true);
+    MatrixOperator H(4,4);
+    H+=make_sigma_sn(world,upper,mx_div_rexp,my_div_rexp,mz_div_rexp,1.0);
+    H+=make_sigma_sn(world,lower,x_div_rexp,y_div_rexp,z_div_rexp,-1.0);
+    return H;
+
 }
 
 /// Hv for ansatz 3
@@ -1275,8 +1305,8 @@ struct ExactSpinor {
         double rho=2*C*r;
         double gamma1= compute_gamma(Z);
         ncf_cusp cusp(cusp_a, Z);
-//        double radial=exp(-rho*0.5)/cusp(r);
-        double radial=1.0/cusp(r);
+        double radial=exp(-rho*0.5)/cusp(r);
+//        double radial=1.0/cusp(r);
         if (k*k>1) radial*=std::pow(rho,gamma-gamma1);
 
         double_complex i={0.0,1.0};
@@ -1364,9 +1394,9 @@ struct ExactSpinor {
         component=3;
         madness::print("making spinor component 3");
         spinor.components[3]=complex_factory_3d(world).functor(*this);
-        radial_exponential radial1(world,C);
-        real_function_3d radial=radial1.compute();
-        spinor.components=spinor.components*radial;
+//        radial_exponential radial1(world,C);
+//        real_function_3d radial=radial1.compute();
+//        spinor.components=spinor.components*radial;
         return spinor;
     }
 
@@ -1776,14 +1806,11 @@ public:
         double c=1.0/alpha1;
         double_complex ii={0.0,1.0};
         double_complex prefac=0.5*(gamma+1) ;
-        double_complex fac=prefac* ii *c/nuclear_charge*(gamma-1);
-        double Z=nuclear_charge;
-        double aa=a;
-        ncf_cusp ncf_cusp1(a,Z);
+        double_complex fac=prefac* (-1.0)*ii *c/nuclear_charge*(gamma-1);
+        ncf_cusp ncf_cusp1(a,nuclear_charge);
         ncf_singularity ncf_singularity1(gamma);
         auto ncf = [&ncf_singularity1,&ncf_cusp1](const coord_3d& r) {
-            if (exact_has_singularity) return ncf_singularity1(r.normf())*ncf_cusp1(r.normf());
-            return ncf_cusp1(r.normf());
+            return ncf_singularity1(r.normf())*ncf_cusp1(r.normf());
         };
 
         complex_function_3d x1=complex_factory_3d(world).functor([&fac,&ncf](const coord_3d& r){return fac*stepfunction(0)(r) / ncf(r);});
@@ -2119,7 +2146,7 @@ int main(int argc, char* argv[]) {
     // set defaults
     int nuclear_charge=92;
     int ansatz=3;
-    double nemo_factor=1.5;
+    double nemo_factor=1.3;
     FunctionDefaults<3>::set_cubic_cell(-20,20);
     FunctionDefaults<3>::set_k(12);
     FunctionDefaults<3>::set_thresh(1.e-10);
@@ -2171,10 +2198,10 @@ int main(int argc, char* argv[]) {
 //    eigenvector_test(world,Ansatz0(nuclear_charge,1),ExactSpinor(2,'P',1.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz1(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz2(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
-//    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.3),ExactSpinor(1,'S',0.5,nuclear_charge));
+    eigenvector_test(world,Ansatz3(nuclear_charge,1,nemo_factor),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.3),ExactSpinor(3,'D',2.5,nuclear_charge));
-//    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.3),ExactSpinor(2,'S',0.5,nuclear_charge));
-//    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.3),ExactSpinor(2,'P',1.5,nuclear_charge));
+    eigenvector_test(world,Ansatz3(nuclear_charge,1,nemo_factor),ExactSpinor(2,'S',0.5,nuclear_charge));
+    eigenvector_test(world,Ansatz3(nuclear_charge,1,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.2),ExactSpinor(2,'P',1.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.2),ExactSpinor(1,'S',0.5,nuclear_charge));
 
