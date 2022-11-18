@@ -25,12 +25,17 @@ double compute_gamma(const double nuclear_charge) {
     return sqrt(1-nuclear_charge*nuclear_charge*alpha1*alpha1);
 }
 
-struct stepfunction {
+struct stepfunction : public FunctionFunctorInterface<double,3> {
     int axis=-1;
     stepfunction(const int axis) : axis(axis) {
         MADNESS_CHECK(axis>=0 && axis<3);
     }
-    double operator()(const coord_3d& r) const { return r[axis]/(r.normf()+epsilon); }
+    double operator()(const coord_3d& r) const override { return r[axis]/(r.normf()+epsilon); }
+    Level special_level() override {return 20;};
+    std::vector<Vector<double, 3UL>> special_points() const override {
+        coord_3d o={0.0,0.0,0.0};
+        return {o};
+    }
 };
 
 struct ncf_cusp {
@@ -391,14 +396,14 @@ public:
 
     n_times_n_dot_p_minus_p(World& world, const int axis1) : world(world), axis(axis1) {}
 
-    std::string info() const {return "n"+std::to_string(axis)+" * n.p";}
+    std::string info() const override {return "n"+std::to_string(axis)+" * n.p";}
 
-    functionT operator()(const functionT& ket) const {
+    functionT operator()(const functionT& ket) const override {
         vecfuncT vket(1,ket);
         return this->operator()(vket)[0];
     }
 
-    vecfuncT operator()(const vecfuncT& vket) const {
+    vecfuncT operator()(const vecfuncT& vket) const override {
         auto D0 = free_space_derivative<T,NDIM>(world,0);
         auto D1 = free_space_derivative<T,NDIM>(world,1);
         auto D2 = free_space_derivative<T,NDIM>(world,2);
@@ -410,22 +415,26 @@ public:
         }
         world.gop.fence();
         const long axis1=axis;
-        real_function_3d n0=real_factory_3d(world).functor([](const coord_3d& r){return stepfunction(0)(r);});
-        real_function_3d n1=real_factory_3d(world).functor([](const coord_3d& r){return stepfunction(1)(r);});
-        real_function_3d n2=real_factory_3d(world).functor([](const coord_3d& r){return stepfunction(2)(r);});
-        real_function_3d naxis=real_factory_3d(world).functor([&axis1](const coord_3d& r){return stepfunction(axis1)(r);});
+        auto stepx=stepfunction(0);
+        auto stepy=stepfunction(1);
+        auto stepz=stepfunction(2);
+        auto step_axis=stepfunction(axis1);
+        real_function_3d n0=real_factory_3d(world).functor(stepx);
+        real_function_3d n1=real_factory_3d(world).functor(stepy);
+        real_function_3d n2=real_factory_3d(world).functor(stepz);
+        real_function_3d naxis=real_factory_3d(world).functor(step_axis);
 
         auto result=naxis * (n0 * apply(world,D0,vket) + n1 * apply(world,D1,vket) + n2*apply(world,D2,vket)) - apply(world,Daxis,vket);
         return truncate(result);
     }
 
-    T operator()(const functionT& bra, const functionT& ket) const {
+    T operator()(const functionT& bra, const functionT& ket) const override {
         vecfuncT vbra(1,bra), vket(1,ket);
         Tensor<T> tmat=this->operator()(vbra,vket);
         return tmat(0l,0l);
     }
 
-    tensorT operator()(const vecfuncT& vbra, const vecfuncT& vket) const {
+    tensorT operator()(const vecfuncT& vbra, const vecfuncT& vket) const override {
         const auto bra_equiv_ket = &vbra == &vket;
         vecfuncT dvket=this->operator()(vket);
         return matrix_inner(world,vbra,dvket, bra_equiv_ket);
@@ -467,8 +476,10 @@ public:
         vecfuncT p1=-ii*apply(world, gradop1, vket);
         vecfuncT p2=-ii*apply(world, gradop2, vket);
         world.gop.fence();
-        real_function_3d r1=real_factory_3d(world).functor([&index1](const coord_3d& r){return stepfunction(index1)(r);});
-        real_function_3d r2=real_factory_3d(world).functor([&index2](const coord_3d& r){return stepfunction(index2)(r);});
+        auto step1=stepfunction(index1);
+        auto step2=stepfunction(index2);
+        real_function_3d r1=real_factory_3d(world).functor(step1);
+        real_function_3d r2=real_factory_3d(world).functor(step2);
 
         auto result=r1*p2 - r2*p1;
         return result;
@@ -1303,10 +1314,7 @@ struct ExactSpinor : public FunctionFunctorInterface<double_complex,3> {
         madness::print("C        ",C);
     }
 
-    /// return the value of this (given a component) *WITHOUT THE EXPONENTIAL PART* due to undersampling over Z=40
-
-    /// the term exp(-\rho/2) is multiplied in get_spinor()
-    double_complex operator()(const coord_3d& c) const {
+    double_complex operator()(const coord_3d& c) const override {
         if (compute_F) return Fvalue(c);
         else return psivalue(c);
     }
