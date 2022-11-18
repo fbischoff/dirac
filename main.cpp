@@ -16,7 +16,6 @@ static bool transform_c=false;
 static bool debug=false;
 static double alpha1=constants::fine_structure_constant;
 static double shift=0.0;
-static bool exact_has_singularity=false;
 static double epsilon=1.e-7;
 static bool use_ble=false;
 static const double bohr_rad=52917.7211;
@@ -64,15 +63,21 @@ struct ncf_singularity {
     }
 };
 
-struct ncf {
+struct ncf : public FunctionFunctorInterface<double,3> {
     ncf_singularity ncfs;
     ncf_cusp ncfc;
+    long power=1;
     ncf(double gamma, double a, double Z) : ncfs(gamma), ncfc(a,Z) {}
-    double operator()(const coord_3d& r) const {
+    double operator()(const coord_3d& r) const override {
         double rr=r.normf();
-        return ncfs(rr) * ncfc(rr);
+        return std::pow(ncfs(rr) * ncfc(rr),power);
     }
 
+    Level special_level() override {return 20;};
+    std::vector<Vector<double, 3UL>> special_points() const override {
+        coord_3d o={0.0,0.0,0.0};
+        return {o};
+    }
 };
 
 double generalized_laguerre(const double alpha, const long n, const double r) {
@@ -1229,7 +1234,7 @@ std::vector<Spinor> orthonormalize_fock(const std::vector<Spinor>& arg,
 
 }
 
-struct ExactSpinor {
+struct ExactSpinor : public FunctionFunctorInterface<double_complex,3> {
     long n, k, l;
     mutable int component=0;
     double E=0.0, C=0.0, gamma=0.0, Z, j, m;
@@ -1257,6 +1262,12 @@ struct ExactSpinor {
             MADNESS_EXCEPTION("confused L quantum in ExactSpinor",1);
         }
         return ll;
+    }
+
+    Level special_level() override {return 20;};
+    std::vector<Vector<double, 3UL>> special_points() const override {
+        coord_3d o={0.0,0.0,0.0};
+        return {o};
     }
 
     double compute_energy() const {
@@ -1306,7 +1317,6 @@ struct ExactSpinor {
         double gamma1= compute_gamma(Z);
         ncf_cusp cusp(cusp_a, Z);
         double radial=exp(-rho*0.5)/cusp(r);
-//        double radial=1.0/cusp(r);
         if (k*k>1) radial*=std::pow(rho,gamma-gamma1);
 
         double_complex i={0.0,1.0};
@@ -1319,8 +1329,6 @@ struct ExactSpinor {
 
         const double G=Z/c * (gamma1 + gamma + 1 -k)*rho*Lnk1 + (gamma1+1)* (gamma - gamma1 -k +1)*En *Lnk;
         const double_complex F=i*(gamma1+1)*(gamma1+gamma - 1 - k) * rho * Lnk1 + i*Z/c *(gamma1- gamma + 1 + k) *En *Lnk;
-
-
 
         if (component==0) {
             return radial * G * Omega(k,m,0)(coord);
@@ -1394,9 +1402,6 @@ struct ExactSpinor {
         component=3;
         madness::print("making spinor component 3");
         spinor.components[3]=complex_factory_3d(world).functor(*this);
-//        radial_exponential radial1(world,C);
-//        real_function_3d radial=radial1.compute();
-//        spinor.components=spinor.components*radial;
         return spinor;
     }
 
@@ -1504,13 +1509,11 @@ public:
     }
 
     MatrixOperator R(World& world) const {
-        MADNESS_CHECK(exact_has_singularity);
         complex_function_3d one1=complex_factory_3d(world).functor([](const coord_3d& r) {return double_complex(1.0,0.0);});
         auto one = LocalPotentialOperator<double_complex, 3>(world, "1" , one1);
         return make_Hdiag(world,one);
     }
     MatrixOperator Rinv(World& world) const {
-        MADNESS_CHECK(exact_has_singularity);
         complex_function_3d one1=complex_factory_3d(world).functor([](const coord_3d& r) {return double_complex(1.0,0.0);});
         auto one = LocalPotentialOperator<double_complex, 3>(world, "1" , one1);
         return make_Hdiag(world,one);
@@ -1575,10 +1578,10 @@ public:
 //        return make_Hdiag(world,r);
 //    }
     MatrixOperator Rinv(World& world) const {
+        MADNESS_EXCEPTION("no Rinv in ansatz1",1);
         const double gamma=compute_gamma(nuclear_charge);
 
         auto ncf = [&gamma](const coord_3d& r){
-            if (exact_has_singularity) return std::pow(r.normf(),-(gamma-1));
             return 1.0;
         };
         complex_function_3d r1 = complex_factory_3d(world).functor(ncf);
@@ -1650,15 +1653,13 @@ public:
     }
 
     MatrixOperator Rinv(World& world) const {
+        MADNESS_EXCEPTION("no Rinv in ansatz2",1);
+
         const double gamma=compute_gamma(nuclear_charge);
         const double Z=nuclear_charge;
         ncf_cusp ncf_cusp1(a,Z);
         ncf_singularity ncf_singularity1(gamma);
-        complex_function_3d r1= exact_has_singularity
-                ? complex_factory_3d(world).functor([&ncf_cusp1,&ncf_singularity1](const coord_3d& r){return 1.0/(ncf_cusp1(r.normf())*ncf_singularity1(r.normf()));})
-                : complex_factory_3d(world).functor([&ncf_cusp1](const coord_3d& r){return 1.0/ncf_cusp1(r.normf());});
-        double n1=r1.norm2();
-        print("norm in Rinv",n1);
+        complex_function_3d r1;
         auto r = LocalPotentialOperator<double_complex, 3>(world, "R" , r1);
         return make_Hdiag(world,r);
     }
@@ -1757,19 +1758,11 @@ public:
         World& world=ket.world();
         const double gamma= compute_gamma(nuclear_charge);
 
-        ncf_cusp ncf_cusp1(a,nuclear_charge);
-        ncf_singularity ncf_singularity1(gamma);
-        auto ncf = [&ncf_singularity1,&ncf_cusp1](const coord_3d& r) {
-            if (exact_has_singularity) return ncf_singularity1(r.normf())*ncf_cusp1(r.normf());
-            return ncf_cusp1(r.normf());
-        };
+        ncf ncf_all(gamma,a,nuclear_charge);
+        ncf_all.power=2;
 
-        real_function_3d r2=real_factory_3d(world)
-                .functor([&ncf,&gamma](const coord_3d& r){
-                    double R=ncf(r);
-                    return 2.0*R*R/(gamma+1.0);
-                });
-        Spinor result=Spinor(r2*ket.components);
+        real_function_3d r2=real_factory_3d(world).functor(ncf_all);
+        Spinor result=2.0/(gamma+1)*Spinor(r2*ket.components);
         return result;
     }
 
@@ -1848,9 +1841,9 @@ void orthonormalize(std::vector<Spinor>& arg, const AnsatzT ansatz) {
     } while (maxq>0.01);
 
     auto bra=ansatz.make_vbra(arg);
-    Tensor<double_complex> S=matrix_inner(bra,arg);
-    print("overlap after orthonormalization");
-    print(S);
+//    Tensor<double_complex> S=matrix_inner(bra,arg);
+//    print("overlap after orthonormalization");
+//    print(S);
 }
 
 
@@ -1901,8 +1894,8 @@ std::vector<Spinor> iterate(const std::vector<Spinor>& input, const std::vector<
     World& world=input.front().world();
     spinorallocator alloc(world,input.size());
     XNonlinearSolver<std::vector<Spinor>,double_complex,spinorallocator> solver(alloc);
-    solver.set_maxsub(1);
-    solver.do_print=false;
+    solver.set_maxsub(3);
+    solver.do_print=true;
 
     auto Hv=ansatz.make_Hv(world);
     auto Hd=ansatz.make_Hd(world);
@@ -1912,6 +1905,7 @@ std::vector<Spinor> iterate(const std::vector<Spinor>& input, const std::vector<
     std::vector<Spinor> current=copy(input);
     orthonormalize(current,ansatz);
     for (int iter=0; iter<maxiter; ++iter) {
+        if (iter<3) solver.clear_subspace();    // start KAIN after 3 iterations only
         double wall0=wall_time();
         print("\nIteration ",iter);
         orthonormalize(current,ansatz);
@@ -1920,7 +1914,7 @@ std::vector<Spinor> iterate(const std::vector<Spinor>& input, const std::vector<
         auto residual=truncate(current-newpsi);
         double res=0.0;
         for (const auto& r : residual) res+=norm2(world,r.components);
-        newpsi=truncate(solver.update(current,residual,1.e-4,100));
+        newpsi=truncate(solver.update(current,residual,1.e-4,3));
         orthonormalize(newpsi,ansatz);
         auto bra=ansatz.make_vbra(newpsi);
         Tensor<double_complex> fock=matrix_inner(bra,H(newpsi));
@@ -1970,39 +1964,40 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const commandli
     Nemo nemo(world,parser);
     if (world.rank()==0) nemo.get_param().print("dft","end");
 
-    nemo.value();
-    std::vector<real_function_3d> nemos=zero_functions<double,3>(world,nstates);
-    for (int i=0; i<nstates; ++i) load<double,3>(nemos[i],"nemo"+std::to_string(i));
-
-    FunctionDefaults<3>::set_thresh(thresh);
-    FunctionDefaults<3>::set_truncate_mode(tmode);
-
-//    nemos=nemo.get_calc()->get_amo();
-
-
-    std::vector<Spinor> sglguess= schrodinger2dirac(nemos,ansatz,nuclear_charge);
-    std::vector<Spinor> bra=ansatz.make_vbra(sglguess);
-    auto ovlp=matrix_inner(bra,sglguess);
-    print("initial ovlp");
-    print(ovlp);
-    orthonormalize(sglguess,ansatz);
-    sglguess=orthonormalize_fock(sglguess,bra,ovlp);
-    bra=ansatz.make_vbra(sglguess);
-    ovlp=matrix_inner(bra,sglguess);
-    print("initial ovlp");
-    print(ovlp);
 
     std::vector<Spinor> guesses;
     std::vector<double> energies;
 
 //    guesses.push_back(guess);
 //    energies.push_back(ansatz.energy());
-    ExactSpinor psi1s=ExactSpinor(1,'S',0.5,nuclear_charge);
     ExactSpinor psi2s=ExactSpinor(2,'S',0.5,nuclear_charge);
+    ExactSpinor psi1s=ExactSpinor(1,'S',0.5,nuclear_charge);
     ExactSpinor psi2p1=ExactSpinor(2,'P',0.5,nuclear_charge);
     ExactSpinor psi2p2=ExactSpinor(2,'P',1.5,nuclear_charge);
 //    std::vector<ExactSpinor> states ={psi1s,psi2p};
-    std::vector<ExactSpinor> states ={psi1s,psi2s,psi2p1,psi2p2};
+    std::vector<ExactSpinor> states ={psi2s,psi1s,psi2p1,psi2p2};
+
+    const bool nemoguess=false;
+    std::vector<Spinor> sglguess;
+    if (nemoguess) {
+        nemo.value();
+        std::vector<real_function_3d> nemos=zero_functions<double,3>(world,nstates);
+        for (int i=0; i<nstates; ++i) load<double,3>(nemos[i],"nemo"+std::to_string(i));
+
+        FunctionDefaults<3>::set_thresh(thresh);
+        FunctionDefaults<3>::set_truncate_mode(tmode);
+        sglguess= schrodinger2dirac(nemos,ansatz,nuclear_charge);
+    } else {
+        for (int i=0; i<nstates; ++i) {
+            states[i].compute_F=true;
+            states[i].cusp_a=ansatz.get_cusp_a();
+            sglguess.push_back(states[i].get_spinor(world));
+        }
+    }
+    orthonormalize(sglguess,ansatz);
+
+
+
 
 //    for (ExactSpinor& state : states) {
     for (int i=0; i<nstates; ++i) {
@@ -2043,16 +2038,14 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const commandli
         print("energy difference           ", compute_electronic_energy(en) - electronic_energy);
         show_norms(bra,guess,"norms of guess before iterate");
     }
-    auto result=iterate(guesses,energies,ansatz,20);
+    auto result=iterate(guesses,energies,ansatz,30);
 
 }
 
 template<typename ansatzT>
 void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
-    exact_has_singularity = false;
     print("=============================================================");
     print("Ansatz", ansatz.name());
-    print("exact spinor has a singularity ",exact_has_singularity);
     es.compute_F=true;
     es.cusp_a=ansatz.get_cusp_a();
     es.print();
@@ -2151,8 +2144,10 @@ int main(int argc, char* argv[]) {
     FunctionDefaults<3>::set_k(12);
     FunctionDefaults<3>::set_thresh(1.e-10);
     int tmode=0;
+    long nstates=1;
     if (parser.key_exists("charge")) nuclear_charge=atoi(parser.value("charge").c_str());
     if (parser.key_exists("k")) FunctionDefaults<3>::set_k(atoi(parser.value("k").c_str()));
+    if (parser.key_exists("nstates")) nstates=atol(parser.value("nstates").c_str());
     if (parser.key_exists("thresh")) FunctionDefaults<3>::set_thresh(atof(parser.value("thresh").c_str()));
     if (parser.key_exists("L")) FunctionDefaults<3>::set_cubic_cell(atof(parser.value("L").c_str()),atof(parser.value("L").c_str()));
     if (parser.key_exists("transform_c")) transform_c=true;
@@ -2198,8 +2193,9 @@ int main(int argc, char* argv[]) {
 //    eigenvector_test(world,Ansatz0(nuclear_charge,1),ExactSpinor(2,'P',1.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz1(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz2(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
-    eigenvector_test(world,Ansatz3(nuclear_charge,1,nemo_factor),ExactSpinor(1,'S',0.5,nuclear_charge));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,1,nemo_factor),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz3(nuclear_charge,1,1.3),ExactSpinor(3,'D',2.5,nuclear_charge));
+    eigenvector_test(world,Ansatz3(nuclear_charge,1,nemo_factor),ExactSpinor(1,'S',0.5,nuclear_charge));
     eigenvector_test(world,Ansatz3(nuclear_charge,1,nemo_factor),ExactSpinor(2,'S',0.5,nuclear_charge));
     eigenvector_test(world,Ansatz3(nuclear_charge,1,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz3(nuclear_charge,1,-1.2),ExactSpinor(2,'P',1.5,nuclear_charge));
@@ -2207,7 +2203,6 @@ int main(int argc, char* argv[]) {
 
 
     try {
-        long nstates=3;
         if (ansatz==0) run(world,Ansatz0(nuclear_charge,k),nuclear_charge,parser,nstates);
         if (ansatz==1) run(world,Ansatz1(nuclear_charge,k),nuclear_charge,parser,nstates);
         if (ansatz==2) run(world,Ansatz2(nuclear_charge,k,nemo_factor),nuclear_charge,parser,nstates);
