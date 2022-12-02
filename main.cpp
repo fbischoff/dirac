@@ -598,7 +598,7 @@ public:
         print(text,norms);
         print("  -- real,imag",realnorms,imagnorms);
 //        print("  -- moments  ",x1,y1,z1,x2,y2,z2);
-        plot(text);
+//        plot(text);
     }
 
     void plot(const std::string filename) const {
@@ -1326,7 +1326,7 @@ std::vector<Spinor> orthonormalize_fock(const std::vector<Spinor>& arg,
 
 struct AnsatzBase {
 public:
-    [[nodiscard]] virtual std::string filename() const {return this->name(); }
+    [[nodiscard]] virtual std::string filename() const {return "ansatz"+this->name(); }
     [[nodiscard]] virtual std::string name() const =0;
 
     AnsatzBase(const double Z, const double a) : nuclear_charge(Z), a(a) {}
@@ -1449,8 +1449,9 @@ public:
 
 struct Ansatz1 : public AnsatzBase {
 public:
-    Ansatz1(const double nuclear_charge, const double a) : AnsatzBase(nuclear_charge,a) {
+    Ansatz1(const double nuclear_charge, const double a=0.0) : AnsatzBase(nuclear_charge,-1.3) {
         iansatz=1;
+        if (a!=0.0) print("Ansatz 1 constructor ignores the cusp length scale a!");
     }
     std::string name() const {
         return "1";
@@ -1605,7 +1606,7 @@ public:
         return std::string("3")+v;
     }
     std::string filename() const {
-        return "3_v"+std::to_string(version) +"_a" +std::to_string(a);
+        return "ansatz3";
     }
 
     Ansatz3(const double nuclear_charge, const double a, const int version=1)
@@ -1752,6 +1753,19 @@ struct ExactSpinor : public FunctionFunctorInterface<double_complex,3> {
         E= compute_energy();
         C=compute_C();
     }
+
+    std::string l_to_string(const long l) const {
+        if (l==0) return "S";
+        if (l==1) return "P";
+        if (l==2) return "D";
+        return "failed";
+    }
+
+    std::string filename() const {
+        return "es_"+std::to_string(n)+l_to_string(l)+std::to_string(j)+"_m"+std::to_string(m);
+        return "es_n"+std::to_string(n)+"_k"+std::to_string(k)+"_j"+std::to_string(j)+"_m"+std::to_string(m);
+    }
+
     void set_ansatz(const AnsatzBase& ansatz) {
         compute_F =  (ansatz.iansatz==3) ? true  : false;
         cusp_a=ansatz.get_cusp_a();
@@ -1847,8 +1861,8 @@ struct ExactSpinor : public FunctionFunctorInterface<double_complex,3> {
         return 0.0;
     }
 
-    double_complex psivalue(const coord_3d& c) const {
-        double r=c.normf();
+    double_complex psivalue(const coord_3d& coord) const {
+        double r=coord.normf();
         double rho=2*C*r;
         double radial=1.0;
         ncf_cusp ncf(cusp_a,Z);
@@ -1867,30 +1881,38 @@ struct ExactSpinor : public FunctionFunctorInterface<double_complex,3> {
             ncf_singularity ncf_s(gamma);
             radial *= ncf_s(r);
         }
+
+
+        const double Lnk1= generalized_laguerre(2*gamma+1.0,n-absk-1,rho);
+        const double Lnk = generalized_laguerre(2*gamma-1.0,n-absk  ,rho);
+        const double En=compute_en();
+        const double c=1.0/alpha1;
+
         double_complex i={0.0,1.0};
-        double g=(n+gamma)*radial;
-        double f=Z*alpha1*radial;
+        double g=radial * (Z/c*rho* Lnk1 + (gamma - k)*En * Lnk);
+        double f=radial * ((gamma-k)*rho*Lnk1 + Z/c*En * Lnk);
+//        double f=Z*alpha1*radial;
         double sgnk= (k>0) ? 1.0 : -1.0;
 
-//        return angular(c,g,f);
+//        return angular(coord,g,f);
 //        if (component==0) {
-//            return g * Xi(k,m,0,j,l)(c);
+//            return g * Xi(k,m,0,j,l)(coord);
 //        } else if (component==1) {
-//            return g * Xi(k,m,1,j,l)(c);
+//            return g * Xi(k,m,1,j,l)(coord);
 //        } else if (component==2) {
-//            return i * f * Xi(-k,m,0,j,l)(c);
+//            return i * f * Xi(-k,m,0,j,l)(coord);
 //        } else if (component==3) {
-//            return i * f * Xi(-k,m,1,j,l)(c);
+//            return i * f * Xi(-k,m,1,j,l)(coord);
 //        }
 
         if (component==0) {
-            return g * Omega(k,m,0)(c);
+            return g * Omega(k,m,0)(coord);
         } else if (component==1) {
-            return g * Omega(k,m,1)(c);
+            return g * Omega(k,m,1)(coord);
         } else if (component==2) {
-            return i * f * Omega(-k,m,0)(c);
+            return i * f * Omega(-k,m,0)(coord);
         } else if (component==3) {
-            return i * f * Omega(-k,m,1)(c);
+            return i * f * Omega(-k,m,1)(coord);
         }
 
         MADNESS_EXCEPTION("confused component in ExactSpinor",1);
@@ -2177,9 +2199,10 @@ void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
     auto exactF = es.get_spinor(world);
     ansatz.normalize(exactF);
     exactF.print_norms("exactf normalized");
-    exactF.plot("exactF");
+    exactF.plot("exact"+es.filename()+ansatz.filename());
     lproj.analyze(exactF,"ExactSpinor");
 
+    return;
     auto exactF1 = ansatz.make_guess(world);
     ansatz.normalize(exactF1);
     lproj.analyze(exactF1,"ansatz.make_guess");
@@ -2325,7 +2348,20 @@ int main(int argc, char* argv[]) {
 
 
 
-    eigenvector_test(world,Ansatz3(nuclear_charge,nemo_factor),ExactSpinor(1,'S',0.5,nuclear_charge,0.5));
+    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(1,'S',0.5,nuclear_charge, 0.5));
+    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(2,'S',0.5,nuclear_charge, 0.5));
+    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(2,'P',0.5,nuclear_charge, 0.5));
+    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge, 1.5));
+//    eigenvector_test(world,Ansatz0(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge, 0.5));
+//    eigenvector_test(world,Ansatz0(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge,-0.5));
+//    eigenvector_test(world,Ansatz0(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge,-1.5));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,nemo_factor),ExactSpinor(2,'S',0.5,nuclear_charge,-0.5));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge, 1.5));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge, 0.5));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge,-0.5));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge,-1.5));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,nemo_factor),ExactSpinor(2,'P',0.5,nuclear_charge, 0.5));
+//    eigenvector_test(world,Ansatz3(nuclear_charge,nemo_factor),ExactSpinor(2,'P',0.5,nuclear_charge, 0.5));
 //    eigenvector_test(world,Ansatz1(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz2(nuclear_charge,1),ExactSpinor(1,'S',0.5,nuclear_charge));
 //    eigenvector_test(world,Ansatz3(nuclear_charge,1,nemo_factor),ExactSpinor(1,'S',0.5,nuclear_charge));
