@@ -2202,7 +2202,6 @@ void eigenvector_test(World& world, const ansatzT ansatz, ExactSpinor es) {
     exactF.plot("exact"+es.filename()+ansatz.filename());
     lproj.analyze(exactF,"ExactSpinor");
 
-    return;
     auto exactF1 = ansatz.make_guess(world);
     ansatz.normalize(exactF1);
     lproj.analyze(exactF1,"ansatz.make_guess");
