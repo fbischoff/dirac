@@ -1,12 +1,14 @@
 #include <iostream>
-#define MADNESS_HAS_LIBXC 0
+// # define MADNESS_HAS_LIBXC 0
 // #define USE_GENTENSOR 0 // only needed if madness was configured with `-D ENABLE_GENTENSOR=1
-#include<madness/chem/nemo.h>
-#include<madness.h>
-#include<madness/chem.h>
-#include<madness/misc/info.h>
-#include<madness/mra/nonlinsol.h>
-#include<madness/world/timing_utilities.h>
+// #include<madness/chem/nemo.h>
+// #include<madness.h>
+// #include<madness/chem.h>
+// #include<madness/misc/info.h>
+// #include<madness/mra/nonlinsol.h>
+// #include<madness/world/timing_utilities.h>
+
+#include<madchem.h>
 
 using namespace madness;
 
@@ -20,6 +22,7 @@ static double epsilon=1.e-12;
 static bool use_ble=false;
 static const double bohr_rad=52917.7211;
 static const double lo=1.e-7;
+
 
 double compute_gamma(const double nuclear_charge) {
     return sqrt(1-nuclear_charge*nuclear_charge*alpha1*alpha1);
@@ -94,38 +97,6 @@ double generalized_laguerre(const double alpha, const long n, const double r) {
     else
     MADNESS_EXCEPTION("generalized Laguerre polynomial implemented only up to order n=2",1);
 }
-
-// direct projection fails for Z>40: compute Z/2 and square afterwords, or do it twice..
-struct radial_exponential {
-    World& world;
-    double C;
-    radial_exponential(World& world, double C) : world(world),C(C) {}
-
-    /// note: \rho = 2 C r, and we return exp(-\rho/2) = exp(-C r)
-    real_function_3d compute() const {
-        coord_3d sp{0.0,0.0,0.0};
-        std::vector<coord_3d> special_points(1,sp);
-
-        double Chalf=C;
-        double N=std::pow(C,1.5)/sqrt(constants::pi);
-        int counter=0;
-        while (Chalf>40) {
-            Chalf*=0.5;
-            N=sqrt(N);
-            counter++;
-        }
-        print("counter",counter);
-        real_function_3d bla=real_factory_3d(world)
-                .functor([&Chalf,&N](const coord_3d& r){
-                    return N*exp(-Chalf*r.normf());
-                })
-                .special_level(30).special_points(special_points);
-
-        for (int i=0; i<counter; ++i) bla=bla.square();
-        return bla;
-    }
-
-};
 
 //Functor to make the fermi nuclear charge distribution (NOT the potential, and NOT normalized) for a given center
 //This is based on Visscher and Dyall's 1997 paper on nuclear charge distributions.
@@ -300,6 +271,37 @@ struct SphericalHarmonics{
     }
 
 };
+
+struct sgl_guess {
+    long n,l,m;
+    double Z;
+    sgl_guess(const long n, const long l, const long m, const double Z) : n(n), l(l), m(m), Z(Z) {}
+
+    double_complex operator()(const coord_3d& coord) const {
+        double_complex Y=SphericalHarmonics(l,m)(coord);
+        double r=coord.normf();
+        double rho=2.0*Z*r/n;
+        double R= generalized_laguerre(2.*l+1.,n-l-1,rho);
+        double e=exp(-0.5*rho);
+        return e*R*std::pow(rho,double(l))*Y;
+    }
+
+    double energy() const {
+        return 0.5*Z*Z/(n*n);
+    }
+
+    complex_function_3d get_wf(World& world) const {
+        std::vector<coord_3d> special_points(1,coord_3d({0.0,0.0,0.0}));
+        complex_function_3d wf = complex_factory_3d(world).functor(*this).special_points(special_points);
+        double norm=wf.norm2();
+        wf.scale(1.0/norm);
+        return wf;
+    }
+
+
+
+};
+
 
 /// following Dyall: p 104f
 struct Xi {
@@ -1229,12 +1231,12 @@ MatrixOperator make_Hd(World& world, const std::pair<double_complex,std::string>
 }
 
 template<typename ansatzT>
-std::vector<Spinor> schrodinger2dirac(const std::vector<real_function_3d> wf, const ansatzT& ansatz, const double nuclear_charge) {
+std::vector<Spinor> schrodinger2dirac(const std::vector<complex_function_3d> wf, const ansatzT& ansatz, const double nuclear_charge) {
     World& world=wf.front().world();
     std::vector<Spinor> sgl;
     for (auto& w : wf ){
         Spinor tmp(world);
-        tmp.components[0]=convert<double,double_complex>(w);
+        tmp.components[0]=w;
         sgl.push_back(tmp);
     }
     MatrixOperator sp=make_alpha_p(world);
@@ -2117,28 +2119,34 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const commandli
                                       psi2p1_half,psi2p1_mhalf,     // 2P 1/2
                                       psi2p2_mhalf,psi2p2_thalf,psi2p2_mhalf,psi2p2_mthalf}; // 2P 3/2
 
-    const bool nemoguess=false;
-    std::vector<Spinor> sglguess;
-    if (nemoguess) {
-        nemo.value();
-        std::vector<real_function_3d> nemos=zero_functions<double,3>(world,nstates);
-        for (int i=0; i<nstates; ++i) load<double,3>(nemos[i],"nemo"+std::to_string(i));
 
-        FunctionDefaults<3>::set_thresh(thresh);
-        FunctionDefaults<3>::set_truncate_mode(tmode);
-        sglguess= schrodinger2dirac(nemos,ansatz,nuclear_charge);
+    sgl_guess sgl_1s=sgl_guess(1,0,0,nuclear_charge);
+    sgl_guess sgl_2s=sgl_guess(2,0,0,nuclear_charge);
+    sgl_guess sgl_2p0=sgl_guess(2,1,0,nuclear_charge);
+    sgl_guess sgl_2p1=sgl_guess(2,1,1,nuclear_charge);
+    sgl_guess sgl_2pm1=sgl_guess(2,1,-1,nuclear_charge);
+    sgl_guess sgl_3s=sgl_guess(3,0,0,nuclear_charge);
+    std::vector<sgl_guess> sgl_states={sgl_1s,sgl_2s,sgl_2p0,sgl_2p1,sgl_2pm1,sgl_3s};
+    std::vector<Spinor> guess;
+    const bool nemoguess=true;
+    print("\nUsing Schroedinger guess\n");
+    if (nemoguess) {
+
+        std::vector<complex_function_3d> wf;
+        for (int i=0; i<nstates; ++i) wf.push_back(sgl_states[i].get_wf(world));
+        guess= schrodinger2dirac(wf,ansatz,nuclear_charge);
     } else {
         for (int i=0; i<nstates; ++i) {
             states[i].set_ansatz(ansatz);
-            sglguess.push_back(states[i].get_spinor(world));
+            guess.push_back(states[i].get_spinor(world));
             states[i].print();
-            sglguess.back().print_norms("sglguess");
+            guess.back().print_norms("guess");
 
         }
     }
-    orthonormalize(sglguess,ansatz);
-    auto bra=ansatz.make_vbra(sglguess);
-    Tensor<double_complex> S=matrix_inner(bra,sglguess);
+    orthonormalize(guess,ansatz);
+    auto bra=ansatz.make_vbra(guess);
+    Tensor<double_complex> S=matrix_inner(bra,guess);
     print("initial overlap after  orthonormalization");
     print(S);
 
@@ -2151,12 +2159,11 @@ void run(World& world, ansatzT ansatz, const int nuclear_charge, const commandli
         state.compute_F=true;
         state.cusp_a=ansatz.get_cusp_a();
 //        Spinor guess=state.get_spinor(world);
-        Spinor guess=sglguess[i];
-        guesses.push_back(guess);
+        Spinor spinorguess=guess[i];
+        guesses.push_back(spinorguess);
         energies.push_back(state.get_energy());
         ansatz.normalize(guesses.back());
     }
-//    guesses=sglguess;
 
 
     const double alpha=constants::fine_structure_constant;
@@ -2344,13 +2351,35 @@ int main(int argc, char* argv[]) {
           es2p1.get_energy()-c*c,
           es2p2.get_energy()-c*c);
 
+    {
+        auto sglguess = sgl_guess(2, 1, 1, nuclear_charge);
+        auto sgl_2s=sglguess.get_wf(world);
+        std::vector<coord_3d> special_points(1,coord_3d({0.0,0.0,0.0}));
+        real_function_3d pot=real_factory_3d(world)
+                .functor([&nuclear_charge](const coord_3d& coord){return -nuclear_charge/(coord.normf()+epsilon);})
+                .special_points(special_points);
+        auto Epot=inner(sgl_2s,pot*sgl_2s);
+        print("Epot",Epot);
+        double_complex Ekin={0.0,0.0};
+        for (int i=0; i<3; ++i) {
+            complex_derivative_3d D(world,i);
+            auto Dguess=D(sgl_2s);
+            Ekin+=0.5*inner(Dguess,Dguess);
+        }
+        print("Ekin",Ekin);
+        print("Etotal",Epot+Ekin);
+        print("Eexact",sglguess.energy());
+    }
 
 
 
-    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(1,'S',0.5,nuclear_charge, 0.5));
-    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(2,'S',0.5,nuclear_charge, 0.5));
-    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(2,'P',0.5,nuclear_charge, 0.5));
-    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge, 1.5));
+
+
+
+//    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(1,'S',0.5,nuclear_charge, 0.5));
+//    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(2,'S',0.5,nuclear_charge, 0.5));
+//    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(2,'P',0.5,nuclear_charge, 0.5));
+//    eigenvector_test(world,Ansatz1(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge, 1.5));
 //    eigenvector_test(world,Ansatz0(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge, 0.5));
 //    eigenvector_test(world,Ansatz0(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge,-0.5));
 //    eigenvector_test(world,Ansatz0(nuclear_charge,nemo_factor),ExactSpinor(2,'P',1.5,nuclear_charge,-1.5));
